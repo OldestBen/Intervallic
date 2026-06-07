@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
@@ -17,10 +16,27 @@ class PlexConfig:
 
 
 @dataclass
+class SftpConfig:
+    host: str
+    remote_directory: str
+    port: int = 22
+    username: str = ""
+    password: Optional[str] = None
+    key_path: Optional[str] = None  # path to private key file
+
+
+@dataclass
 class OutputConfig:
-    directory: str
+    # For local output: path on this machine (or a mounted share)
+    directory: Optional[str] = None
+    # For remote SFTP output
+    sftp: Optional[SftpConfig] = None
     format: str = "m3u8"
     overwrite: bool = True
+
+    def validate(self) -> None:
+        if not self.directory and not self.sftp:
+            raise ValueError("output must specify either 'directory' or 'sftp'")
 
 
 @dataclass
@@ -55,11 +71,25 @@ def load_config(path: str) -> Config:
     )
 
     out_raw = raw.get("output", {})
+    sftp_raw = out_raw.get("sftp")
+    sftp = None
+    if sftp_raw:
+        sftp = SftpConfig(
+            host=sftp_raw["host"],
+            remote_directory=sftp_raw["remote_directory"],
+            port=sftp_raw.get("port", 22),
+            username=sftp_raw.get("username", ""),
+            password=sftp_raw.get("password"),
+            key_path=sftp_raw.get("key_path"),
+        )
+
     output = OutputConfig(
-        directory=out_raw["directory"],
+        directory=out_raw.get("directory"),
+        sftp=sftp,
         format=out_raw.get("format", "m3u8"),
         overwrite=out_raw.get("overwrite", True),
     )
+    output.validate()
 
     mappings = [
         PathMapping(from_prefix=m["from"], to_prefix=m["to"])
@@ -67,3 +97,8 @@ def load_config(path: str) -> Config:
     ]
 
     return Config(plex=plex, output=output, path_mapping=mappings)
+
+
+def save_config(cfg_dict: dict, path: str) -> None:
+    with open(path, "w") as f:
+        yaml.dump(cfg_dict, f, default_flow_style=False, allow_unicode=True, sort_keys=False)

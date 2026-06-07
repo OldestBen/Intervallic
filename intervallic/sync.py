@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-from pathlib import Path
-from typing import List, Optional
-
 from .config import Config
-from .plex_client import PlexClient, PlexPlaylist
-from .roon_writer import write_all_playlists
+from .plex_client import PlexClient
+from .output import write_all_playlists
 
 
 def run_sync(config: Config, dry_run: bool = False) -> None:
@@ -29,8 +26,15 @@ def run_sync(config: Config, dry_run: bool = False) -> None:
         print("\nDry run — no files written.")
         return
 
+    destination = (
+        f"sftp://{config.output.sftp.host}{config.output.sftp.remote_directory}"
+        if config.output.sftp
+        else config.output.directory
+    )
+    print(f"\nWriting to {destination}…")
+
     written = write_all_playlists(playlists, config)
 
-    print(f"\nWrote {len(written)} playlist file(s) to {config.output.directory}:")
+    print(f"Wrote {len(written)} playlist file(s):")
     for path in written:
         print(f"  {path}")

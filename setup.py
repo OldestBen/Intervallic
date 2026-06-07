@@ -9,6 +9,7 @@ setup(
         "mutagen>=1.47.0",
         "pyyaml>=6.0",
         "click>=8.1.0",
+        "paramiko>=3.4.0",
     ],
     entry_points={
         "console_scripts": [
