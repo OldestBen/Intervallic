@@ -5,6 +5,12 @@ Guides the user through:
   2. Choosing local-directory or SFTP output
   3. Configuring path mapping if Plex and Roon see different mount points
   4. Writing config.yaml
+
+Verified against plexapi source:
+  - MyPlexPinLogin must be initialised with oauth=True
+  - OAuth URL method is oauthUrl(), not authUrl()
+  - checkLogin() works when run() has NOT been called (manual poll loop)
+  - MyPlexResource.provides is a string; filter with "server" in provides
 """
 from __future__ import annotations
 
@@ -16,7 +22,7 @@ import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Optional
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlencode
 
 import click
 import yaml
@@ -42,7 +48,7 @@ def _header(msg: str) -> None:
 
 
 def _local_ip() -> str:
-    """Best-guess LAN IP — what other devices on the network would use to reach us."""
+    """Best-effort LAN IP — what other devices on the network reach us by."""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
@@ -61,56 +67,100 @@ def _print_qr(url: str) -> None:
         qr.make(fit=True)
         qr.print_ascii(invert=True)
     except Exception:
-        pass
+        pass  # qrcode not available or terminal too narrow — URL already shown
 
 
-# ── Plex OAuth via local callback server ──────────────────────────────────────
+# ── Plex OAuth ────────────────────────────────────────────────────────────────
 
-_CALLBACK_HTML_OK = """\
+def _new_pin_login():
+    """Return a MyPlexPinLogin configured for OAuth. Exits on failure."""
+    from plexapi.myplex import MyPlexPinLogin
+    try:
+        return MyPlexPinLogin(oauth=True)
+    except Exception as exc:
+        click.echo(f"  Could not reach plex.tv: {exc}", err=True)
+        sys.exit(1)
+
+
+def _poll_for_token(pin_login, timeout: int = 300) -> str:
+    """
+    Poll plex.tv until the user completes OAuth sign-in.
+
+    checkLogin() returns True once the user has signed in, and sets
+    pin_login.token. We must NOT call run() before this — checkLogin()
+    only polls directly when no background thread is running.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            if pin_login.checkLogin():
+                return pin_login.token
+        except Exception:
+            pass
+        time.sleep(2)
+        click.echo(".", nl=False)
+
+    click.echo()
+    click.echo("  Timed out waiting for authentication.", err=True)
+    sys.exit(1)
+
+
+# ── Option 1: local callback server ──────────────────────────────────────────
+
+_HTML_REDIRECT = """\
 <!DOCTYPE html><html><head><meta charset="utf-8">
-<title>Intervallic — authenticated</title>
-<style>body{{font-family:sans-serif;text-align:center;margin-top:4rem;color:#222}}
-h1{{color:#e5a00d}}p{{font-size:1.1rem}}</style></head><body>
-<h1>&#10003; Authenticated</h1>
-<p>You can close this tab and return to the terminal.</p>
-</body></html>"""
+<meta http-equiv="refresh" content="0;url={url}">
+<title>Redirecting…</title></head>
+<body><p>Redirecting to Plex…</p></body></html>"""
 
-_CALLBACK_HTML_ERR = """\
+_HTML_OK = """\
 <!DOCTYPE html><html><head><meta charset="utf-8">
-<title>Intervallic — error</title></head><body>
-<h1>Something went wrong</h1><p>{msg}</p>
-</body></html>"""
+<title>Authenticated</title>
+<style>body{{font-family:sans-serif;text-align:center;margin-top:4rem}}
+h1{{color:#e5a00d}}</style></head>
+<body><h1>&#10003; Signed in</h1><p>You can close this tab.</p></body></html>"""
+
+_HTML_ERR = """\
+<!DOCTYPE html><html><head><meta charset="utf-8">
+<title>Error</title></head>
+<body><h1>Authentication failed</h1><p>{msg}</p></body></html>"""
 
 
-def _run_callback_server(port: int, pin_login, result: dict, stop_event: threading.Event) -> None:
-    """Tiny HTTP server that handles the Plex OAuth redirect and polls for the token."""
+def _run_callback_server(
+    port: int,
+    pin_login,
+    result: dict,
+    stop: threading.Event,
+) -> None:
+    local_ip = _local_ip()
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
-            pass  # silence access log
+            pass
+
+        def _send(self, code: int, body: str) -> None:
+            encoded = body.encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
 
         def do_GET(self):
-            parsed = urlparse(self.path)
-
-            # Landing page — user visits http://LXC-IP:PORT/
-            if parsed.path in ("/", ""):
-                auth_url = pin_login.authUrl(
-                    forwardUrl=f"http://{_local_ip()}:{port}/callback"
+            if self.path in ("/", ""):
+                # Build the Plex OAuth URL with our /callback as the forwardUrl
+                oauth_url = pin_login.oauthUrl(
+                    forwardUrl=f"http://{local_ip}:{port}/callback"
                 )
-                self.send_response(302)
-                self.send_header("Location", auth_url)
-                self.end_headers()
-                return
+                self._send(200, _HTML_REDIRECT.format(url=oauth_url))
 
-            # Plex redirects here after the user signs in
-            if parsed.path == "/callback":
-                # Poll for up to 15 s — the redirect arrives almost immediately
+            elif self.path.startswith("/callback"):
+                # Plex redirected back here after sign-in — poll for the token
                 token = None
-                for _ in range(15):
+                for _ in range(20):
                     try:
-                        pin_login.checkLogin()
-                        token = pin_login.token
-                        if token:
+                        if pin_login.checkLogin():
+                            token = pin_login.token
                             break
                     except Exception:
                         pass
@@ -118,172 +168,131 @@ def _run_callback_server(port: int, pin_login, result: dict, stop_event: threadi
 
                 if token:
                     result["token"] = token
-                    body = _CALLBACK_HTML_OK.encode()
-                    self.send_response(200)
-                    self.send_header("Content-Type", "text/html; charset=utf-8")
-                    self.send_header("Content-Length", str(len(body)))
-                    self.end_headers()
-                    self.wfile.write(body)
-                    stop_event.set()
+                    self._send(200, _HTML_OK)
+                    stop.set()
                 else:
-                    msg = "Could not retrieve token. Please try again."
-                    body = _CALLBACK_HTML_ERR.format(msg=msg).encode()
-                    self.send_response(500)
-                    self.send_header("Content-Type", "text/html; charset=utf-8")
-                    self.end_headers()
-                    self.wfile.write(body)
-                return
+                    self._send(500, _HTML_ERR.format(msg="Could not retrieve token — please try again."))
 
-            self.send_response(404)
-            self.end_headers()
+            else:
+                self.send_response(404)
+                self.end_headers()
 
-    server = HTTPServer(("0.0.0.0", port), Handler)
-    server.timeout = 1  # check stop_event every second
-    while not stop_event.is_set():
-        server.handle_request()
-    server.server_close()
+    srv = HTTPServer(("0.0.0.0", port), Handler)
+    srv.timeout = 1
+    while not stop.is_set():
+        srv.handle_request()
+    srv.server_close()
 
 
-def _oauth_via_local_server(port: int = 9876) -> tuple[str, str]:
+def _oauth_local_server(port: int) -> str:
     """
-    Spin up a local HTTP server on port 9876.
-    User visits http://LXC-IP:9876 from any browser on the network.
-    Server redirects them through Plex OAuth and captures the token.
-    No QR code, no copy-paste — just one URL.
+    Spin up a tiny HTTP server. User visits http://LXC-IP:PORT from any browser.
+    Server redirects them through Plex OAuth and captures the token automatically.
     """
-    from plexapi.myplex import MyPlexPinLogin
-
-    try:
-        pin_login = MyPlexPinLogin()
-    except Exception as exc:
-        click.echo(f"  Could not reach plex.tv: {exc}", err=True)
-        sys.exit(1)
-
+    pin_login = _new_pin_login()
     result: dict = {}
-    stop_event = threading.Event()
+    stop = threading.Event()
 
-    server_thread = threading.Thread(
+    t = threading.Thread(
         target=_run_callback_server,
-        args=(port, pin_login, result, stop_event),
+        args=(port, pin_login, result, stop),
         daemon=True,
     )
-    server_thread.start()
+    t.start()
 
     local_url = f"http://{_local_ip()}:{port}"
-    click.echo(f"\n  Open this URL in any browser on your network:\n")
+    click.echo(f"\n  Open this URL from any browser on your network:\n")
     click.echo(f"      {local_url}\n")
     _print_qr(local_url)
-    click.echo("\n  Waiting for authentication", nl=False)
+    click.echo("\n  Waiting for sign-in", nl=False)
 
-    timeout = 300  # 5 minutes
-    elapsed = 0
-    while not stop_event.is_set() and elapsed < timeout:
-        time.sleep(2)
-        elapsed += 2
-        click.echo(".", nl=False)
-
+    stop.wait(timeout=300)
     click.echo()
 
     if not result.get("token"):
         click.echo("  Timed out or authentication failed.", err=True)
         sys.exit(1)
 
-    token = result["token"]
-    click.echo("  Authenticated successfully.")
-    return token
+    click.echo("  Signed in successfully.")
+    return result["token"]
 
 
-def _oauth_polling(port: int = 9876) -> tuple[str, str]:
-    """
-    Fallback: display plex.tv auth URL + QR code and poll for completion.
-    Used when the local callback server can't bind (port in use, etc.).
-    """
-    from plexapi.myplex import MyPlexPinLogin
+# ── Option 2: direct plex.tv link + polling ───────────────────────────────────
 
-    try:
-        pin_login = MyPlexPinLogin()
-    except Exception as exc:
-        click.echo(f"  Could not reach plex.tv: {exc}", err=True)
-        sys.exit(1)
+def _oauth_direct_link() -> str:
+    """Show the plex.tv OAuth URL (and QR code). Poll until sign-in completes."""
+    pin_login = _new_pin_login()
+    auth_url = pin_login.oauthUrl()
 
-    auth_url = pin_login.authUrl()
-    click.echo(f"\n  Open this URL in any browser and sign in:\n\n      {auth_url}\n")
+    click.echo(f"\n  Open this URL in any browser and sign in:\n")
+    click.echo(f"      {auth_url}\n")
     _print_qr(auth_url)
-    click.echo("\n  Waiting for authentication", nl=False)
+    webbrowser.open(auth_url)   # no-op on headless, fine to attempt
 
-    timeout, elapsed = 300, 0
-    token = None
-    while elapsed < timeout:
-        time.sleep(2)
-        elapsed += 2
-        click.echo(".", nl=False)
-        try:
-            pin_login.checkLogin()
-            token = pin_login.token
-            if token:
-                break
-        except Exception:
-            pass
-
+    click.echo("\n  Waiting for sign-in", nl=False)
+    token = _poll_for_token(pin_login)
     click.echo()
-    if not token:
-        click.echo("  Timed out.", err=True)
-        sys.exit(1)
-
-    click.echo("  Authenticated successfully.")
+    click.echo("  Signed in successfully.")
     return token
 
 
-def _resolve_servers(token: str) -> str:
-    """Fetch server list and let user pick one. Returns URL."""
+# ── Option 3: paste token manually ───────────────────────────────────────────
+
+def _manual_token() -> tuple[str, str]:
+    click.echo(
+        "\n  To find your Plex token:\n"
+        "  1. Open Plex Web and sign in\n"
+        "  2. Browse to any item → ⋮ menu → Get Info → View XML\n"
+        "  3. Copy the value of  X-Plex-Token=  from the URL bar\n"
+    )
+    url   = _prompt("Plex server URL", default="http://localhost:32400")
+    token = _prompt("Plex token (X-Plex-Token)")
+    return url, token
+
+
+# ── Server picker (shared by options 1 + 2) ───────────────────────────────────
+
+def _pick_server(token: str) -> str:
+    """Fetch server list from plex.tv and let user choose. Returns URL."""
     try:
         from plexapi.myplex import MyPlexAccount
         account = MyPlexAccount(token=token)
-        resources = [r for r in account.resources() if "server" in r.provides]
-    except Exception:
-        resources = []
+        # provides is a string e.g. "server" or "server,sync-target"
+        servers = [r for r in account.resources() if "server" in r.provides]
+    except Exception as exc:
+        click.echo(f"  Could not fetch server list: {exc}", err=True)
+        return _prompt("Plex server URL", default="http://localhost:32400")
 
-    if not resources:
+    if not servers:
         click.echo("  No servers found on this account.")
         return _prompt("Plex server URL", default="http://localhost:32400")
 
-    if len(resources) == 1:
-        url = _best_connection(resources[0])
-        click.echo(f"  Server: {resources[0].name}  →  {url}")
+    if len(servers) == 1:
+        url = _best_connection(servers[0])
+        click.echo(f"  Server: {servers[0].name}  →  {url}")
         if not _confirm("Use this server?"):
             url = _prompt("Plex server URL", default=url)
         return url
 
     click.echo("\n  Your Plex servers:")
-    for i, res in enumerate(resources):
-        click.echo(f"    [{i + 1}]  {res.name}")
-    idx = click.prompt("  Choose", type=click.IntRange(1, len(resources)), default=1) - 1
-    url = _best_connection(resources[idx])
-    click.echo(f"  Using: {resources[idx].name}  →  {url}")
+    for i, s in enumerate(servers):
+        click.echo(f"    [{i + 1}]  {s.name}")
+    idx = click.prompt("  Choose", type=click.IntRange(1, len(servers)), default=1) - 1
+    url = _best_connection(servers[idx])
+    click.echo(f"  Using: {servers[idx].name}  →  {url}")
     if not _confirm("Correct?"):
         url = _prompt("Plex server URL", default=url)
     return url
 
 
 def _best_connection(resource) -> str:
+    """Prefer non-local (externally reachable) connections, then first listed."""
     for conn in resource.connections:
         if not conn.local:
             return conn.uri
     if resource.connections:
         return resource.connections[0].uri
     return "http://localhost:32400"
-
-
-def _manual_token() -> tuple[str, str]:
-    click.echo(
-        "\nTo find your Plex token manually:\n"
-        "  1. Open Plex Web and sign in\n"
-        "  2. Browse to any item → ⋮ → Get Info → View XML\n"
-        "  3. Copy the value of  X-Plex-Token=  from the URL\n"
-    )
-    url = _prompt("Plex server URL", default="http://localhost:32400")
-    token = _prompt("Plex token (X-Plex-Token)")
-    return url, token
 
 
 def _test_plex(url: str, token: str) -> bool:
@@ -296,38 +305,40 @@ def _test_plex(url: str, token: str) -> bool:
         return False
 
 
+# ── Wizard step 1 ─────────────────────────────────────────────────────────────
+
 def wizard_plex() -> dict:
     _header("Step 1 of 3 — Plex authentication")
 
     click.echo(
-        "\n  [1]  Local auth server  — visit http://THIS-IP:9876 from any browser\n"
-        "                            on your network; token captured automatically\n"
-        "  [2]  plex.tv link       — open the plex.tv URL in any browser and sign in\n"
-        "  [3]  Paste token        — manually copy a token from Plex Web\n"
+        "\n  [1]  Local auth server  (recommended for headless)\n"
+        "       Starts a web server on this machine; visit it from any\n"
+        "       browser or phone on your network to sign in.\n"
+        "\n"
+        "  [2]  Direct plex.tv link\n"
+        "       Open the printed URL (or scan the QR code) in any browser.\n"
+        "\n"
+        "  [3]  Paste token manually\n"
+        "       Copy your X-Plex-Token from Plex Web.\n"
     )
     choice = click.prompt("Choose", type=click.Choice(["1", "2", "3"]), default="1")
 
-    url: Optional[str] = None
-    token: Optional[str] = None
+    if choice == "1":
+        port = click.prompt("  Port for auth server", default=9876, type=int)
+        try:
+            probe = socket.socket()
+            probe.bind(("0.0.0.0", port))
+            probe.close()
+        except OSError:
+            click.echo(f"  Port {port} is already in use — switching to option 2.")
+            choice = "2"
 
     if choice == "1":
-        port = click.prompt("  Port for local auth server", default=9876, type=int)
-        try:
-            # Check port is available before starting thread
-            s = socket.socket()
-            s.bind(("0.0.0.0", port))
-            s.close()
-        except OSError:
-            click.echo(f"  Port {port} is in use — falling back to direct plex.tv link.")
-            token = _oauth_polling()
-        else:
-            token = _oauth_via_local_server(port)
-        url = _resolve_servers(token)
-
+        token = _oauth_local_server(port)
+        url = _pick_server(token)
     elif choice == "2":
-        token = _oauth_polling()
-        url = _resolve_servers(token)
-
+        token = _oauth_direct_link()
+        url = _pick_server(token)
     else:
         url, token = _manual_token()
 
@@ -341,7 +352,7 @@ def wizard_plex() -> dict:
     return {"url": url, "token": token, "playlist_filter": [], "playlist_exclude": []}
 
 
-# ── Step 2 — Output ───────────────────────────────────────────────────────────
+# ── Wizard step 2: output ─────────────────────────────────────────────────────
 
 def wizard_output() -> dict:
     _header("Step 2 of 3 — Playlist destination")
@@ -369,24 +380,26 @@ def wizard_output() -> dict:
 
 def _wizard_sftp() -> dict:
     click.echo()
-    host = _prompt("Roon host (hostname or IP)")
-    port = click.prompt("SSH port", default=22, type=int)
-    username = _prompt("SSH username", default=os.getenv("USER", ""))
+    host       = _prompt("Roon host (hostname or IP)")
+    port       = click.prompt("SSH port", default=22, type=int)
+    username   = _prompt("SSH username", default=os.getenv("USER", ""))
     remote_dir = _prompt(
         "Remote path to Roon's watched playlist folder",
         default=f"/home/{os.getenv('USER', 'roon')}/Music/Playlists",
     )
 
-    click.echo(
-        "\n  [1]  SSH key file  (recommended)\n"
-        "  [2]  Password\n"
-    )
+    click.echo("\n  [1]  SSH key file  (recommended)\n  [2]  Password\n")
     auth = click.prompt("Auth method", type=click.Choice(["1", "2"]), default="1")
 
-    sftp: dict = {"host": host, "port": port, "username": username, "remote_directory": remote_dir}
+    sftp: dict = {
+        "host": host, "port": port,
+        "username": username, "remote_directory": remote_dir,
+    }
 
     if auth == "1":
-        sftp["key_path"] = _prompt("Path to private key", default=os.path.expanduser("~/.ssh/id_rsa"))
+        sftp["key_path"] = _prompt(
+            "Path to private key", default=os.path.expanduser("~/.ssh/id_rsa")
+        )
     else:
         sftp["password"] = click.prompt("SSH password", hide_input=True)
 
@@ -406,16 +419,16 @@ def _wizard_sftp() -> dict:
     return sftp
 
 
-# ── Step 3 — Path mapping ─────────────────────────────────────────────────────
+# ── Wizard step 3: path mapping ───────────────────────────────────────────────
 
 def wizard_path_mapping() -> list:
     _header("Step 3 of 3 — Path mapping")
 
     click.echo(
-        "\nPlex stores the file path it knows for each track (e.g. /data/music/…).\n"
+        "\nPlex stores the path it knows for each track (e.g. /data/music/…).\n"
         "If Roon mounts the same library at a different path (e.g. /mnt/nas/music/…)\n"
         "those paths need to be translated.\n"
-        "\nSkip this if both Plex and Roon use identical paths.\n"
+        "\nSkip if both apps use identical paths.\n"
     )
 
     if not _confirm("Set up path remapping?", default=False):
@@ -460,6 +473,6 @@ def run_wizard(output_path: str) -> None:
 
     click.echo(
         f"\nConfig written to {output_path}\n"
-        f"\nTest it:     intervallic sync --dry-run\n"
-        f"Run a sync:  intervallic sync\n"
+        f"\n  Test:   intervallic sync --dry-run\n"
+        f"  Sync:   intervallic sync\n"
     )
