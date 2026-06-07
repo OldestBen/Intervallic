@@ -1,0 +1,25 @@
+plex:
+  url: "http://localhost:32400"
+  token: "YOUR_PLEX_TOKEN_HERE"
+  # Optional: only sync these playlists (empty = sync all)
+  playlist_filter: []
+  # Optional: skip playlists matching these names
+  playlist_exclude: []
+
+output:
+  # Directory Roon watches for imported playlists
+  directory: "/path/to/roon/watched/Playlists"
+  # m3u8 (UTF-8, recommended) or m3u
+  format: "m3u8"
+  # Overwrite existing playlist files on each sync
+  overwrite: true
+
+# Translate Plex file paths to Roon file paths.
+# Useful when both apps see the same NAS/library at different mount points.
+# Applied in order; first matching prefix wins.
+path_mapping:
+  - from: "/data/music"
+    to: "/mnt/nas/music"
+  # Add more mappings as needed:
+  # - from: "/Volumes/Music"
+  #   to: "/media/music"
