@@ -1,50 +1,50 @@
 #!/usr/bin/env bash
-# Sets up a Python virtual environment and installs dependencies.
-# Handles Debian/Ubuntu externally-managed-environment and missing ensurepip.
-# Safe to run multiple times.
+# Bootstrap a working Python venv and install Intervallic.
+# Handles Debian/Ubuntu externally-managed-environment restrictions.
+# Run as root on a fresh system, or as a user with sudo.
 set -euo pipefail
 
 VENV_DIR="${1:-.venv}"
 
-# ── Ensure python3 is present ─────────────────────────────────────────────────
-if ! command -v python3 &>/dev/null; then
-    echo "[error] python3 not found."
-    echo "        Run: apt install python3"
-    exit 1
-fi
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
-PY_VERSION=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
-echo "Python $PY_VERSION detected."
-
-# ── Ensure python3-venv / ensurepip is present ───────────────────────────────
-if ! python3 -m ensurepip --version &>/dev/null 2>&1; then
-    echo "ensurepip not available — installing python${PY_VERSION}-venv …"
+apt_install() {
     if command -v apt-get &>/dev/null; then
-        apt-get install -y "python${PY_VERSION}-venv"
-    elif command -v apt &>/dev/null; then
-        apt install -y "python${PY_VERSION}-venv"
+        apt-get install -y "$@"
     else
-        echo "[error] apt not found. Install python${PY_VERSION}-venv manually."
+        echo "[error] apt-get not found. Install manually: $*" >&2
         exit 1
     fi
+}
+
+# ── 1. Require python3 ────────────────────────────────────────────────────────
+if ! command -v python3 &>/dev/null; then
+    echo "python3 not found — installing …"
+    apt_install python3
 fi
 
-# ── Create venv ───────────────────────────────────────────────────────────────
+PY_VER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+echo "Python $PY_VER found."
+
+# ── 2. Ensure python3.X-venv is installed ────────────────────────────────────
+if ! dpkg -s "python${PY_VER}-venv" &>/dev/null 2>&1; then
+    echo "Installing python${PY_VER}-venv …"
+    apt_install "python${PY_VER}-venv"
+fi
+
+# ── 3. Remove any broken venv (created before venv package was installed) ─────
+if [ -d "$VENV_DIR" ] && ! "$VENV_DIR/bin/python" -c "import ensurepip" &>/dev/null 2>&1; then
+    echo "Removing broken virtual environment …"
+    rm -rf "$VENV_DIR"
+fi
+
+# ── 4. Create venv ────────────────────────────────────────────────────────────
 if [ ! -d "$VENV_DIR" ]; then
     echo "Creating virtual environment in $VENV_DIR …"
     python3 -m venv "$VENV_DIR"
-else
-    echo "Virtual environment already exists at $VENV_DIR."
 fi
 
-# ── Bootstrap pip if missing (e.g. --without-pip venvs) ──────────────────────
-if [ ! -f "$VENV_DIR/bin/pip" ]; then
-    echo "pip not found in venv — bootstrapping …"
-    python3 -m ensurepip --upgrade
-    "$VENV_DIR/bin/python" -m ensurepip --upgrade
-fi
-
-# ── Install dependencies ──────────────────────────────────────────────────────
+# ── 5. Install dependencies ───────────────────────────────────────────────────
 echo "Upgrading pip …"
 "$VENV_DIR/bin/pip" install --quiet --upgrade pip
 
@@ -53,8 +53,8 @@ echo "Installing dependencies …"
 "$VENV_DIR/bin/pip" install --quiet -e .
 
 echo ""
-echo "✓ Installation complete."
+echo "Done."
 echo ""
-echo "  Activate the environment:   source $VENV_DIR/bin/activate"
-echo "  Run the setup wizard:       $VENV_DIR/bin/intervallic setup"
-echo "  Or use make targets:        make setup | make sync | make dry-run"
+echo "  Activate:       source $VENV_DIR/bin/activate"
+echo "  Setup wizard:   $VENV_DIR/bin/intervallic setup"
+echo "  Or use make:    make setup | make sync | make dry-run"
