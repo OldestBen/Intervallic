@@ -39,23 +39,25 @@ def _header(msg: str) -> None:
 
 # ── Step 1 — Plex OAuth ───────────────────────────────────────────────────────
 
+def _print_qr(url: str) -> None:
+    try:
+        import qrcode
+        qr = qrcode.QRCode(border=1)
+        qr.add_data(url)
+        qr.make(fit=True)
+        qr.print_ascii(invert=True)
+    except Exception:
+        pass  # qrcode unavailable or terminal too narrow — URL is still shown
+
+
 def _oauth_login() -> tuple[str, str]:
     """
     Authenticate via Plex PIN OAuth — no password ever touches the terminal.
 
-    Flow:
-      1. Request a PIN from plex.tv
-      2. Open (or display) the auth URL
-      3. Poll until the user completes sign-in
-      4. Exchange PIN for an account token
-      5. List servers and let the user pick one
+    Works headless: displays the auth URL as a QR code so you can scan it
+    with a phone. The LXC polls plex.tv until sign-in completes.
     """
     from plexapi.myplex import MyPlexPinLogin
-
-    click.echo(
-        "\nOpening plex.tv in your browser to sign in.\n"
-        "No password is entered here — authentication happens entirely in the browser.\n"
-    )
 
     try:
         pin_login = MyPlexPinLogin()
@@ -64,14 +66,13 @@ def _oauth_login() -> tuple[str, str]:
         sys.exit(1)
 
     auth_url = pin_login.authUrl()
-    click.echo(f"  Auth URL: {auth_url}\n")
 
-    opened = webbrowser.open(auth_url)
-    if not opened:
-        click.echo("  Could not open a browser automatically.")
-        click.echo("  Copy the URL above into a browser on any device, sign in, then return here.\n")
-    else:
-        click.echo("  A browser window should have opened. Sign in, then return here.\n")
+    click.echo("\n  Scan the QR code with your phone, or open the URL in any browser:\n")
+    _print_qr(auth_url)
+    click.echo(f"\n  {auth_url}\n")
+
+    # Try to open a local browser too — silently ignore failures (headless is fine)
+    webbrowser.open(auth_url)
 
     click.echo("Waiting for you to complete sign-in", nl=False)
     poll_interval = 2   # seconds

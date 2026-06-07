@@ -10,6 +10,7 @@ setup(
         "pyyaml>=6.0",
         "click>=8.1.0",
         "paramiko>=3.4.0",
+        "qrcode>=7.4.2",
     ],
     entry_points={
         "console_scripts": [
