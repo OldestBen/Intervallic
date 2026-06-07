@@ -1,0 +1,37 @@
+# Intervallic — example config
+# Run  intervallic setup  to generate this interactively.
+
+plex:
+  url: "http://192.168.1.10:32400"   # or https:// for remote access
+  token: "YOUR_PLEX_TOKEN_HERE"       # obtained via  intervallic setup
+  # Optional: only sync these playlists (empty list = sync all)
+  playlist_filter: []
+  # Optional: never sync playlists with these names
+  playlist_exclude: []
+
+# ── Option A: local path (same host, or mounted share) ──────────────────────
+output:
+  directory: "/mnt/nas/music/Playlists"   # folder Roon watches
+  format: "m3u8"    # m3u8 (UTF-8, recommended) or m3u
+  overwrite: true
+
+# ── Option B: SFTP to the Roon host ─────────────────────────────────────────
+# output:
+#   format: m3u8
+#   overwrite: true
+#   sftp:
+#     host: "192.168.2.50"         # Roon host IP or hostname
+#     port: 22
+#     username: "roonuser"
+#     remote_directory: "/home/roonuser/Music/Playlists"
+#     key_path: "~/.ssh/id_rsa"   # use key_path OR password, not both
+#     # password: "secret"
+
+# Translate Plex file paths → Roon file paths.
+# Needed when both apps mount the same library at different paths.
+# Applied in order; first matching prefix wins.
+path_mapping:
+  - from: "/data/music"
+    to: "/mnt/nas/music"
+  # - from: "/Volumes/Music"
+  #   to: "/media/music"
