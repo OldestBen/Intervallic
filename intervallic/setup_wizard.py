@@ -1,17 +1,17 @@
 """Interactive setup wizard.
 
 Guides the user through:
-  1. Locating / authenticating with their Plex server and obtaining a token
+  1. Authenticating with Plex via browser OAuth (no password in terminal)
   2. Choosing local-directory or SFTP output
   3. Configuring path mapping if Plex and Roon see different mount points
   4. Writing config.yaml
-
-Run via:  intervallic setup
 """
 from __future__ import annotations
 
 import os
 import sys
+import time
+import webbrowser
 from typing import Optional
 
 import click
@@ -22,8 +22,8 @@ from .config import SftpConfig
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _prompt(msg: str, default: str = "", hide: bool = False) -> str:
-    val = click.prompt(msg, default=default or None, hide_input=hide, show_default=bool(default))
+def _prompt(msg: str, default: str = "") -> str:
+    val = click.prompt(msg, default=default or None, show_default=bool(default))
     return val.strip() if isinstance(val, str) else val
 
 
@@ -37,44 +37,86 @@ def _header(msg: str) -> None:
     click.echo(f"{'─' * 60}")
 
 
-# ── Step 1 — Plex ─────────────────────────────────────────────────────────────
+# ── Step 1 — Plex OAuth ───────────────────────────────────────────────────────
 
-def _get_plex_token_via_login() -> tuple[str, str]:
-    """Authenticate with plex.tv and return (server_url, token)."""
+def _oauth_login() -> tuple[str, str]:
+    """
+    Authenticate via Plex PIN OAuth — no password ever touches the terminal.
+
+    Flow:
+      1. Request a PIN from plex.tv
+      2. Open (or display) the auth URL
+      3. Poll until the user completes sign-in
+      4. Exchange PIN for an account token
+      5. List servers and let the user pick one
+    """
+    from plexapi.myplex import MyPlexPinLogin
+
     click.echo(
-        "\nYou can sign in with your Plex account to automatically retrieve your\n"
-        "token and discover your server address. Your credentials are sent\n"
-        "directly to plex.tv and are not stored.\n"
+        "\nOpening plex.tv in your browser to sign in.\n"
+        "No password is entered here — authentication happens entirely in the browser.\n"
     )
-    username = _prompt("Plex username / email")
-    password = _prompt("Plex password", hide=True)
+
+    try:
+        pin_login = MyPlexPinLogin()
+    except Exception as exc:
+        click.echo(f"  Could not reach plex.tv: {exc}", err=True)
+        sys.exit(1)
+
+    auth_url = pin_login.authUrl()
+    click.echo(f"  Auth URL: {auth_url}\n")
+
+    opened = webbrowser.open(auth_url)
+    if not opened:
+        click.echo("  Could not open a browser automatically.")
+        click.echo("  Copy the URL above into a browser on any device, sign in, then return here.\n")
+    else:
+        click.echo("  A browser window should have opened. Sign in, then return here.\n")
+
+    click.echo("Waiting for you to complete sign-in", nl=False)
+    poll_interval = 2   # seconds
+    timeout = 300       # 5 minutes
+    elapsed = 0
+    token: Optional[str] = None
+
+    while elapsed < timeout:
+        time.sleep(poll_interval)
+        elapsed += poll_interval
+        click.echo(".", nl=False)
+
+        try:
+            pin_login.checkLogin()
+            token = pin_login.token
+            if token:
+                break
+        except Exception:
+            pass  # not done yet
+
+    click.echo()  # newline after dots
+
+    if not token:
+        click.echo("\n  Timed out waiting for authentication.", err=True)
+        sys.exit(1)
+
+    click.echo("  Authenticated successfully.")
 
     try:
         from plexapi.myplex import MyPlexAccount
-        account = MyPlexAccount(username, password)
+        account = MyPlexAccount(token=token)
+        resources = [r for r in account.resources() if "server" in r.provides]
     except Exception as exc:
-        click.echo(f"\n  Login failed: {exc}", err=True)
-        sys.exit(1)
-
-    token = account.authenticationToken
-    click.echo(f"\n  Token obtained.")
-
-    # Let user pick a server if they have more than one
-    try:
-        resources = [r for r in account.resources() if r.provides == "server"]
-    except Exception:
-        resources = []
+        click.echo(f"  Could not fetch server list: {exc}", err=True)
+        url = _prompt("Plex server URL", default="http://localhost:32400")
+        return url, token
 
     if not resources:
-        click.echo("  No servers found on this account. Enter the URL manually.")
+        click.echo("  No Plex servers found on this account.")
         url = _prompt("Plex server URL", default="http://localhost:32400")
         return url, token
 
     if len(resources) == 1:
-        res = resources[0]
-        # Try to get a reachable connection
-        url = _best_connection(res)
-        click.echo(f"  Found server: {res.name}  →  {url}")
+        url = _best_connection(resources[0])
+        click.echo(f"  Server: {resources[0].name}  →  {url}")
         if not _confirm("Use this server?"):
             url = _prompt("Plex server URL", default=url)
         return url, token
@@ -87,16 +129,16 @@ def _get_plex_token_via_login() -> tuple[str, str]:
         type=click.IntRange(1, len(resources)),
         default=1,
     ) - 1
-    res = resources[idx]
-    url = _best_connection(res)
-    click.echo(f"  Using: {res.name}  →  {url}")
+    url = _best_connection(resources[idx])
+    click.echo(f"  Using: {resources[idx].name}  →  {url}")
     if not _confirm("Correct?"):
         url = _prompt("Plex server URL", default=url)
     return url, token
 
 
 def _best_connection(resource) -> str:
-    """Return the first reachable connection URL, or the first listed."""
+    # Prefer non-local (externally reachable) connections first,
+    # fall back to first available, then localhost.
     for conn in resource.connections:
         if not conn.local:
             return conn.uri
@@ -105,15 +147,13 @@ def _best_connection(resource) -> str:
     return "http://localhost:32400"
 
 
-def _manual_plex() -> tuple[str, str]:
+def _manual_token() -> tuple[str, str]:
     click.echo(
-        "\nTo find your token manually:\n"
-        "  1. Open Plex Web in a browser\n"
-        "  2. Play any item, then open the browser dev tools → Network\n"
-        "  3. Look for a request containing  X-Plex-Token=<value>  in the URL\n"
-        "  4. Copy that value\n"
-        "  Alternatively, go to a media item → ⋮ → Get Info → View XML.\n"
-        "  The token appears in the URL as  ?X-Plex-Token=...\n"
+        "\nTo find your Plex token manually:\n"
+        "  1. Open Plex Web in a browser and sign in\n"
+        "  2. Browse to any media item → ⋮ menu → Get Info → View XML\n"
+        "  3. The token appears in the URL as  ?X-Plex-Token=XXXXXXXXXXXX\n"
+        "  4. Copy that value below\n"
     )
     url = _prompt("Plex server URL", default="http://localhost:32400")
     token = _prompt("Plex token (X-Plex-Token)")
@@ -126,30 +166,29 @@ def _test_plex(url: str, token: str) -> bool:
         PlexServer(url, token)
         return True
     except Exception as exc:
-        click.echo(f"  Could not connect: {exc}", err=True)
+        click.echo(f"  Connection test failed: {exc}", err=True)
         return False
 
 
 def wizard_plex() -> dict:
-    _header("Step 1 of 3 — Plex server")
+    _header("Step 1 of 3 — Plex authentication")
 
-    method = click.prompt(
-        "\nHow would you like to authenticate?",
-        type=click.Choice(["login", "manual"], case_sensitive=False),
-        default="login",
-        show_choices=True,
+    click.echo(
+        "\n  [1]  Sign in via browser  (recommended — no password in terminal)\n"
+        "  [2]  Paste token manually  (if running headless with no browser)\n"
     )
+    choice = click.prompt("Choose", type=click.Choice(["1", "2"]), default="1")
 
-    if method == "login":
-        url, token = _get_plex_token_via_login()
+    if choice == "1":
+        url, token = _oauth_login()
     else:
-        url, token = _manual_plex()
+        url, token = _manual_token()
 
-    click.echo("\nTesting connection…", nl=False)
+    click.echo("\nTesting connection … ", nl=False)
     if _test_plex(url, token):
-        click.echo("  OK")
+        click.echo("OK")
     else:
-        if not _confirm("Connection failed. Continue anyway?", default=False):
+        if not _confirm("Continue anyway?", default=False):
             sys.exit(1)
 
     return {"url": url, "token": token, "playlist_filter": [], "playlist_exclude": []}
@@ -158,12 +197,12 @@ def wizard_plex() -> dict:
 # ── Step 2 — Output ───────────────────────────────────────────────────────────
 
 def wizard_output() -> dict:
-    _header("Step 2 of 3 — Where should playlists be delivered?")
+    _header("Step 2 of 3 — Playlist destination")
 
     click.echo(
         "\nRoon imports playlists from M3U8 files placed in a folder it watches.\n"
-        "Intervallic can write those files:\n"
-        "  [1]  Local path  — same machine, or a network share already mounted here\n"
+        "\n"
+        "  [1]  Local path  — same machine, or a share already mounted here\n"
         "  [2]  SFTP        — push files directly to the Roon host over SSH\n"
     )
     choice = click.prompt("Choose", type=click.Choice(["1", "2"]), default="1")
@@ -171,11 +210,10 @@ def wizard_output() -> dict:
     out: dict = {"format": "m3u8", "overwrite": True}
 
     if choice == "1":
-        directory = _prompt(
-            "Local path to Roon's watched playlist folder",
+        out["directory"] = _prompt(
+            "Path to Roon's watched playlist folder",
             default=os.path.expanduser("~/Music/Playlists"),
         )
-        out["directory"] = directory
     else:
         out["sftp"] = _wizard_sftp()
 
@@ -189,48 +227,32 @@ def _wizard_sftp() -> dict:
     username = _prompt("SSH username", default=os.getenv("USER", ""))
     remote_dir = _prompt(
         "Remote path to Roon's watched playlist folder",
-        default="/home/" + (os.getenv("USER", "roon") + "/Music/Playlists"),
+        default=f"/home/{os.getenv('USER', 'roon')}/Music/Playlists",
     )
 
     click.echo(
-        "\nAuthentication — choose one:\n"
-        "  [1]  SSH private key (recommended)\n"
+        "\n  [1]  SSH key file  (recommended)\n"
         "  [2]  Password\n"
     )
-    auth = click.prompt("Choose", type=click.Choice(["1", "2"]), default="1")
+    auth = click.prompt("Auth method", type=click.Choice(["1", "2"]), default="1")
 
-    sftp: dict = {
-        "host": host,
-        "port": port,
-        "username": username,
-        "remote_directory": remote_dir,
-    }
+    sftp: dict = {"host": host, "port": port, "username": username, "remote_directory": remote_dir}
 
     if auth == "1":
-        default_key = os.path.expanduser("~/.ssh/id_rsa")
-        key_path = _prompt("Path to private key file", default=default_key)
-        sftp["key_path"] = key_path
+        sftp["key_path"] = _prompt("Path to private key", default=os.path.expanduser("~/.ssh/id_rsa"))
     else:
-        password = _prompt("SSH password", hide=True)
-        sftp["password"] = password
+        sftp["password"] = click.prompt("SSH password", hide_input=True)
 
-    # Test
-    click.echo("\nTesting SFTP connection…", nl=False)
+    click.echo("\nTesting SFTP connection … ", nl=False)
     from .output import test_sftp_connection
-    ok, msg = test_sftp_connection(
-        SftpConfig(
-            host=host,
-            port=port,
-            username=username,
-            remote_directory=remote_dir,
-            password=sftp.get("password"),
-            key_path=sftp.get("key_path"),
-        )
-    )
+    ok, msg = test_sftp_connection(SftpConfig(
+        host=host, port=port, username=username, remote_directory=remote_dir,
+        password=sftp.get("password"), key_path=sftp.get("key_path"),
+    ))
     if ok:
-        click.echo("  OK")
+        click.echo("OK")
     else:
-        click.echo(f"  Failed: {msg}", err=True)
+        click.echo(f"Failed: {msg}", err=True)
         if not _confirm("Continue anyway?", default=False):
             sys.exit(1)
 
@@ -243,19 +265,19 @@ def wizard_path_mapping() -> list:
     _header("Step 3 of 3 — Path mapping")
 
     click.echo(
-        "\nPlex embeds the file path it knows into each track (e.g. /data/music/…).\n"
+        "\nPlex stores the file path it knows for each track (e.g. /data/music/…).\n"
         "If Roon mounts the same library at a different path (e.g. /mnt/nas/music/…)\n"
-        "you need to tell Intervallic how to translate those paths.\n"
-        "\nIf both apps use the exact same paths, skip this step.\n"
+        "those paths need to be translated.\n"
+        "\nSkip this if both Plex and Roon use identical paths.\n"
     )
 
-    if not _confirm("Do you need to remap paths?", default=False):
+    if not _confirm("Set up path remapping?", default=False):
         return []
 
     mappings = []
     while True:
         from_prefix = _prompt("  Plex path prefix (e.g. /data/music)")
-        to_prefix = _prompt("  Roon path prefix (e.g. /mnt/nas/music)")
+        to_prefix   = _prompt("  Roon path prefix (e.g. /mnt/nas/music)")
         mappings.append({"from": from_prefix, "to": to_prefix})
         if not _confirm("  Add another mapping?", default=False):
             break
@@ -272,31 +294,25 @@ def run_wizard(output_path: str) -> None:
         "Press Ctrl-C at any time to cancel without writing anything."
     )
 
-    plex = wizard_plex()
-    output = wizard_output()
+    plex        = wizard_plex()
+    output      = wizard_output()
     path_mapping = wizard_path_mapping()
 
-    cfg = {
-        "plex": plex,
-        "output": output,
-    }
+    cfg: dict = {"plex": plex, "output": output}
     if path_mapping:
         cfg["path_mapping"] = path_mapping
 
-    click.echo(f"\nWriting config to {output_path}…")
-
     if os.path.exists(output_path) and not _confirm(
-        f"  {output_path} already exists. Overwrite?", default=False
+        f"\n{output_path} already exists. Overwrite?", default=False
     ):
-        click.echo("Cancelled. No files written.")
+        click.echo("Cancelled — no files written.")
         sys.exit(0)
 
     with open(output_path, "w") as f:
         yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
 
     click.echo(
-        f"\nDone! Run a test with:\n"
-        f"  intervallic --config {output_path} --dry-run\n"
-        f"\nThen sync for real with:\n"
-        f"  intervallic --config {output_path}\n"
+        f"\nConfig written to {output_path}\n"
+        f"\nTest it:       intervallic sync --dry-run\n"
+        f"Run a sync:    intervallic sync\n"
     )
