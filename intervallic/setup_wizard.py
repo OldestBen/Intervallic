@@ -409,7 +409,7 @@ def _wizard_sftp() -> dict:
         sftp["password"] = click.prompt("SSH password", hide_input=True)
 
     # SSH scan for candidate paths — works regardless of how the host was found
-    click.echo("\n  Scanning Roon host for music library paths … ", nl=False)
+    click.echo("\n  Scanning Roon host for SMB mounts and music library paths … ", nl=False)
     from .roon_discovery import find_remote_playlist_paths
     candidates = find_remote_playlist_paths(
         host=host, port=ssh_port, username=username,
@@ -417,7 +417,11 @@ def _wizard_sftp() -> dict:
     )
 
     if candidates:
-        click.echo(f"found {len(candidates)} candidate(s).\n")
+        click.echo(f"done.\n")
+        click.echo(
+            "  Roon imports M3U8 files from inside its watched music folders.\n"
+            "  Paths from SMB/CIFS mounts are listed first — those are most likely correct.\n"
+        )
         shown = candidates[:6]
         for i, p in enumerate(shown):
             click.echo(f"    [{i + 1}]  {p}")
@@ -425,11 +429,13 @@ def _wizard_sftp() -> dict:
         idx = click.prompt("  Choose", type=click.IntRange(1, len(shown) + 1), default=1)
         remote_dir = shown[idx - 1] if idx <= len(shown) else _prompt("Remote path")
     else:
-        click.echo("could not scan.")
-        remote_dir = _prompt(
-            "Remote path to Roon's watched playlist folder",
-            default=f"/home/{username}/Music/Playlists",
+        click.echo("could not scan (will enter manually).")
+        click.echo(
+            "\n  Note: Roon imports M3U8 files from inside its watched music folders.\n"
+            "  For SMB/NAS setups, that is the mount point on the Roon host\n"
+            "  (e.g. /mnt/music/Playlists), NOT a local folder on this machine.\n"
         )
+        remote_dir = _prompt("Remote path to place M3U8 files")
 
     sftp["remote_directory"] = remote_dir
 
