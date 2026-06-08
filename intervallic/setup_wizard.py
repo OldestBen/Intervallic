@@ -543,12 +543,8 @@ def _generate_and_install_key(host: str, port: int, username: str, key_path: str
         with open(pub_path) as f:
             pubkey = f.read().strip()
         import paramiko
-        client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        client.connect(
-            hostname=host, port=port, username=username, password=password,
-            look_for_keys=False, allow_agent=False,
-        )
+        from .ssh_util import _open_ssh
+        client = _open_ssh(host, port, username, password=password)
         client.exec_command(
             f"mkdir -p ~/.ssh && chmod 700 ~/.ssh && "
             f"echo '{pubkey}' >> ~/.ssh/authorized_keys && "
