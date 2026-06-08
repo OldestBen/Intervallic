@@ -6,7 +6,6 @@ setup(
     packages=find_packages(),
     install_requires=[
         "plexapi>=4.15.0",
-        "mutagen>=1.47.0",
         "pyyaml>=6.0",
         "click>=8.1.0",
         "paramiko>=3.4.0",

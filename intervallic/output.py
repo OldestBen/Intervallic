@@ -4,10 +4,12 @@ from __future__ import annotations
 import posixpath
 import re
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Tuple, Union
 
 from .config import Config, SftpConfig, SmbConfig
 from .plex_client import PlexPlaylist
+
+_ENCODING = "utf-8"
 
 
 def _safe_filename(name: str) -> str:
@@ -23,10 +25,6 @@ def _build_m3u_content(playlist: PlexPlaylist, config: Config) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _encoding(fmt: str) -> str:
-    return "utf-8"
-
-
 # ── Local output ──────────────────────────────────────────────────────────────
 
 def write_local(playlist: PlexPlaylist, config: Config) -> Path:
@@ -37,7 +35,7 @@ def write_local(playlist: PlexPlaylist, config: Config) -> Path:
     dest = out_dir / (_safe_filename(playlist.name) + ext)
     if dest.exists() and not config.output.overwrite:
         return dest
-    dest.write_text(_build_m3u_content(playlist, config), encoding=_encoding(config.output.format))
+    dest.write_text(_build_m3u_content(playlist, config), encoding=_ENCODING)
     return dest
 
 
@@ -71,7 +69,7 @@ def write_sftp(playlist: PlexPlaylist, config: Config) -> str:
     cfg = config.output.sftp
     filename = _safe_filename(playlist.name) + f".{config.output.format}"
     remote_path = posixpath.join(cfg.remote_directory, filename)
-    content = _build_m3u_content(playlist, config).encode(_encoding(config.output.format))
+    content = _build_m3u_content(playlist, config).encode(_ENCODING)
 
     ssh, sftp = _open_sftp(cfg)
     try:
@@ -128,24 +126,20 @@ def write_smb(playlist: PlexPlaylist, config: Config) -> str:
     cfg = config.output.smb
     filename = _safe_filename(playlist.name) + f".{config.output.format}"
     unc_path = _smb_unc(cfg, filename)
-    content = _build_m3u_content(playlist, config).encode(_encoding(config.output.format))
+    content = _build_m3u_content(playlist, config).encode(_ENCODING)
 
     _register_smb_session(cfg)
 
-    # Create the subdirectory if needed
     if cfg.directory:
         dir_unc = f"//{cfg.server}/{cfg.share}/{cfg.directory.strip('/')}"
-        try:
-            smbclient.makedirs(dir_unc, exist_ok=True)
-        except Exception:
-            pass
+        smbclient.makedirs(dir_unc, exist_ok=True)
 
-    try:
-        smbclient.stat(unc_path)
-        if not config.output.overwrite:
+    if not config.output.overwrite:
+        try:
+            smbclient.stat(unc_path)
             return unc_path
-    except Exception:
-        pass
+        except FileNotFoundError:
+            pass
 
     with smbclient.open_file(unc_path, mode="wb") as f:
         f.write(content)
@@ -166,7 +160,7 @@ def test_smb_connection(smb_cfg: SmbConfig) -> Tuple[bool, str]:
 
 # ── Dispatcher ────────────────────────────────────────────────────────────────
 
-def write_playlist(playlist: PlexPlaylist, config: Config):
+def write_playlist(playlist: PlexPlaylist, config: Config) -> Union[Path, str]:
     if config.output.smb:
         return write_smb(playlist, config)
     if config.output.sftp:
@@ -174,5 +168,5 @@ def write_playlist(playlist: PlexPlaylist, config: Config):
     return write_local(playlist, config)
 
 
-def write_all_playlists(playlists: List[PlexPlaylist], config: Config) -> list:
+def write_all_playlists(playlists: List[PlexPlaylist], config: Config) -> List[Union[Path, str]]:
     return [write_playlist(pl, config) for pl in playlists]
