@@ -11,6 +11,7 @@ setup(
         "click>=8.1.0",
         "paramiko>=3.4.0",
         "qrcode>=7.4.2",
+        "roonapi>=0.1.6",
     ],
     entry_points={
         "console_scripts": [
