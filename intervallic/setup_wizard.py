@@ -469,28 +469,40 @@ def _wizard_sftp() -> dict:
         "\n  Scanning Roon host for SMB shares (Roon mounts these via kernel CIFS) … ",
         nl=False,
     )
-    from .roon_discovery import find_remote_playlist_paths
+    from .roon_discovery import find_remote_playlist_paths, ScanDiagnostics
+    diag = ScanDiagnostics()
     candidates = find_remote_playlist_paths(
         host=host, port=ssh_port, username=username,
         password=sftp.get("password"), key_path=sftp.get("key_path"),
+        diag=diag,
     )
 
-    if candidates:
+    if candidates and diag.ssh_ok:
+        # Filter out the home fallback from the top of the list if better options exist
+        real_candidates = [c for c in candidates if not c.startswith(("/root", "/home"))]
+        display = real_candidates[:6] if real_candidates else candidates[:6]
         click.echo("found.\n")
-        click.echo("  These are the SMB shares Roon has mounted — pick where to put playlists:\n")
-        shown = candidates[:6]
-        for i, p in enumerate(shown):
+        click.echo("  These are the paths Roon has access to — pick where to put playlists:\n")
+        for i, p in enumerate(display):
             click.echo(f"    [{i + 1}]  {p}")
-        click.echo(f"    [{len(shown) + 1}]  Enter manually")
-        idx = click.prompt("  Choose", type=click.IntRange(1, len(shown) + 1), default=1)
-        remote_dir = shown[idx - 1] if idx <= len(shown) else _prompt("Remote path")
+        click.echo(f"    [{len(display) + 1}]  Enter manually")
+        idx = click.prompt("  Choose", type=click.IntRange(1, len(display) + 1), default=1)
+        remote_dir = display[idx - 1] if idx <= len(display) else _prompt("Remote path")
     else:
         click.echo("none found.\n")
+        click.echo("  Scan diagnostics:\n")
+        for line in diag.report().splitlines():
+            click.echo(f"    {line}")
+        click.echo()
+        if not diag.ssh_ok:
+            click.echo("  Fix the SSH connection above and re-run setup.")
+            sys.exit(1)
         click.echo(
-            "  Could not detect CIFS mounts. This can happen if:\n"
-            "   • Roon hasn't been configured with an SMB storage location yet\n"
-            "   • The SMB share was added but hasn't been rescanned\n"
-            "   • SSH connection failed (check credentials above)\n"
+            "  SSH connected but no mounts or audio files were found.\n"
+            "  Possible reasons:\n"
+            "   • SMB storage not yet added in Roon Settings → Storage\n"
+            "   • Proxmox bind-mount not yet configured on the host\n"
+            "   • Music is on a path not searched (/opt, /volume1, etc.)\n"
         )
         remote_dir = _prompt("Remote path to place M3U8 files")
 
