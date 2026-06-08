@@ -45,9 +45,10 @@ def _confirm(msg: str, default: bool = True) -> bool:
 
 
 def _header(msg: str) -> None:
-    click.echo(f"\n{'─' * 60}")
-    click.echo(f"  {msg}")
-    click.echo(f"{'─' * 60}")
+    bar = click.style("─" * 60, fg="cyan", dim=True)
+    click.echo(f"\n{bar}")
+    click.echo(f"  {click.style(msg, bold=True)}")
+    click.echo(bar)
 
 
 def _local_ip() -> str:
@@ -637,9 +638,9 @@ def wizard_path_mapping() -> list:
 
 def run_wizard(output_path: str) -> None:
     click.echo(
-        "\nWelcome to Intervallic setup.\n"
-        "This wizard will create your config file in 3 short steps.\n"
-        "Press Ctrl-C at any time to cancel without writing anything."
+        f"\n  {click.style('Intervallic', fg='cyan', bold=True)}  setup\n\n"
+        "  This wizard will create your config file in 3 short steps.\n"
+        f"  Press {click.style('Ctrl-C', bold=True)} at any time to cancel without writing anything."
     )
 
     plex         = wizard_plex()
@@ -660,7 +661,8 @@ def run_wizard(output_path: str) -> None:
         yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
 
     click.echo(
-        f"\nConfig written to {output_path}\n"
-        f"\n  Test:   intervallic sync --dry-run\n"
-        f"  Sync:   intervallic sync\n"
+        f"\n  {click.style('✓', fg='green', bold=True)}  Config written to "
+        f"{click.style(output_path, bold=True)}\n\n"
+        f"  Test your setup:   {click.style('intervallic sync --dry-run', bold=True)}\n"
+        f"  Run a full sync:   {click.style('intervallic sync', bold=True)}\n"
     )
