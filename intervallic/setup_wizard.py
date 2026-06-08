@@ -33,7 +33,10 @@ from .config import SftpConfig
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _prompt(msg: str, default: str = "") -> str:
-    val = click.prompt(msg, default=default or None, show_default=bool(default))
+    if default:
+        val = click.prompt(msg, default=default, show_default=True)
+    else:
+        val = click.prompt(msg, default="", show_default=False)
     return val.strip() if isinstance(val, str) else val
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Optional
 
+import click
 from plexapi.server import PlexServer
 
 
@@ -42,7 +43,12 @@ class PlexClient:
                 continue
 
             tracks = []
-            for item in pl.items():
+            try:
+                items = pl.items()
+            except Exception as exc:
+                click.echo(f"  Warning: skipping playlist '{pl.title}' — {exc}", err=True)
+                continue
+            for item in items:
                 media = item.media
                 if not media:
                     continue
