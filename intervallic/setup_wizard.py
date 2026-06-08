@@ -70,6 +70,10 @@ def _print_qr(url: str) -> None:
         pass  # qrcode not available or terminal too narrow — URL already shown
 
 
+class _WizardBack(Exception):
+    """Raised by an output-method sub-wizard to signal the user wants to go back."""
+
+
 # ── Plex OAuth ────────────────────────────────────────────────────────────────
 
 def _new_pin_login():
@@ -357,31 +361,37 @@ def wizard_plex() -> dict:
 def wizard_output() -> dict:
     _header("Step 2 of 3 — Roon playlist destination")
 
-    click.echo(
-        "\nRoon on Linux mounts SMB shares via the kernel CIFS driver — those\n"
-        "mount points are accessible over SSH. Intervallic only writes M3U8\n"
-        "files and never touches Roon's database.\n"
-        "\n"
-        "  [1]  SSH to Roon host  — detects mounted SMB shares automatically\n"
-        "                           (recommended for Linux / Proxmox LXC)\n"
-        "  [2]  SMB credentials   — connect directly to the NAS (cross-platform)\n"
-        "  [3]  Local path        — Roon is on this machine or share is mounted here\n"
-    )
-    choice = click.prompt("Choose", type=click.Choice(["1", "2", "3"]), default="1")
-
-    out: dict = {"format": "m3u8", "overwrite": True}
-
-    if choice == "1":
-        out["sftp"] = _wizard_sftp()
-    elif choice == "2":
-        out["smb"] = _wizard_smb()
-    else:
-        out["directory"] = _prompt(
-            "Path to Roon's watched playlist folder",
-            default=os.path.expanduser("~/Music/Playlists"),
+    default_choice = "1"
+    while True:
+        click.echo(
+            "\nRoon on Linux mounts SMB shares via the kernel CIFS driver — those\n"
+            "mount points are accessible over SSH. Intervallic only writes M3U8\n"
+            "files and never touches Roon's database.\n"
+            "\n"
+            "  [1]  SSH to Roon host  — detects mounted SMB shares automatically\n"
+            "                           (recommended for Linux / Proxmox LXC)\n"
+            "  [2]  SMB credentials   — connect directly to the NAS (cross-platform)\n"
+            "  [3]  Local path        — Roon is on this machine or share is mounted here\n"
         )
+        choice = click.prompt("Choose", type=click.Choice(["1", "2", "3"]), default=default_choice)
 
-    return out
+        out: dict = {"format": "m3u8", "overwrite": True}
+
+        try:
+            if choice == "1":
+                out["sftp"] = _wizard_sftp()
+            elif choice == "2":
+                out["smb"] = _wizard_smb()
+            else:
+                out["directory"] = _prompt(
+                    "Path to Roon's watched playlist folder",
+                    default=os.path.expanduser("~/Music/Playlists"),
+                )
+            return out
+        except _WizardBack:
+            click.echo("\n  Going back to output method selection …")
+            default_choice = choice
+            continue
 
 
 def _wizard_smb() -> dict:
@@ -426,7 +436,7 @@ def _wizard_smb() -> dict:
     else:
         click.echo(f"Failed: {msg}", err=True)
         if not _confirm("Continue anyway?", default=False):
-            sys.exit(1)
+            raise _WizardBack()
 
     return smb
 
@@ -443,86 +453,123 @@ def _wizard_sftp() -> dict:
     core = discover_roon_core(timeout=6)
     click.echo(f"found at {core}" if core else "not found (cross-VLAN — enter IP manually)")
 
-    host     = _prompt("Roon host (hostname or IP)", default=core or "")
-    ssh_port = click.prompt("SSH port", default=22, type=int)
-    username = _prompt("SSH username", default="root")
+    # Seed defaults so retries remember what was entered previously
+    default_host     = core or ""
+    default_port     = 22
+    default_username = "root"
+    default_auth     = "2"   # password is more common for first-time users
+    default_key      = os.path.expanduser("~/.ssh/id_rsa")
 
-    click.echo("\n  [1]  SSH key file  (recommended — no password stored)\n  [2]  Password\n")
-    auth = click.prompt("Auth method", type=click.Choice(["1", "2"]), default="1")
-
-    sftp: dict = {"host": host, "port": ssh_port, "username": username}
-
-    if auth == "1":
-        default_key = os.path.expanduser("~/.ssh/id_rsa")
-        # Offer to generate a key and install it if none exists
-        if not os.path.exists(default_key):
-            click.echo(f"\n  No key found at {default_key}.")
-            if _confirm("  Generate one and install it on the Roon host now?"):
-                _generate_and_install_key(host, ssh_port, username, default_key)
-        sftp["key_path"] = _prompt("Path to private key", default=default_key)
-    else:
-        sftp["password"] = click.prompt("SSH password", hide_input=True)
-
-    # Scan /proc/mounts on the Roon host for CIFS entries — those are the
-    # SMB shares Roon mounted via mount.cifs when you added them in Settings → Storage
-    click.echo(
-        "\n  Scanning Roon host for SMB shares (Roon mounts these via kernel CIFS) … ",
-        nl=False,
-    )
     from .roon_discovery import find_remote_playlist_paths, ScanDiagnostics
-    diag = ScanDiagnostics()
-    candidates = find_remote_playlist_paths(
-        host=host, port=ssh_port, username=username,
-        password=sftp.get("password"), key_path=sftp.get("key_path"),
-        diag=diag,
-    )
-
-    if candidates and diag.ssh_ok:
-        # Filter out the home fallback from the top of the list if better options exist
-        real_candidates = [c for c in candidates if not c.startswith(("/root", "/home"))]
-        display = real_candidates[:6] if real_candidates else candidates[:6]
-        click.echo("found.\n")
-        click.echo("  These are the paths Roon has access to — pick where to put playlists:\n")
-        for i, p in enumerate(display):
-            click.echo(f"    [{i + 1}]  {p}")
-        click.echo(f"    [{len(display) + 1}]  Enter manually")
-        idx = click.prompt("  Choose", type=click.IntRange(1, len(display) + 1), default=1)
-        remote_dir = display[idx - 1] if idx <= len(display) else _prompt("Remote path")
-    else:
-        click.echo("none found.\n")
-        click.echo("  Scan diagnostics:\n")
-        for line in diag.report().splitlines():
-            click.echo(f"    {line}")
-        click.echo()
-        if not diag.ssh_ok:
-            click.echo("  Fix the SSH connection above and re-run setup.")
-            sys.exit(1)
-        click.echo(
-            "  SSH connected but no mounts or audio files were found.\n"
-            "  Possible reasons:\n"
-            "   • SMB storage not yet added in Roon Settings → Storage\n"
-            "   • Proxmox bind-mount not yet configured on the host\n"
-            "   • Music is on a path not searched (/opt, /volume1, etc.)\n"
-        )
-        remote_dir = _prompt("Remote path to place M3U8 files")
-
-    sftp["remote_directory"] = remote_dir
-
-    click.echo("\nTesting SFTP connection … ", nl=False)
     from .output import test_sftp_connection
-    ok, msg = test_sftp_connection(SftpConfig(
-        host=host, port=ssh_port, username=username,
-        remote_directory=remote_dir,
-        password=sftp.get("password"), key_path=sftp.get("key_path"),
-    ))
-    if ok:
-        click.echo("OK")
-    else:
-        click.echo(f"Failed: {msg}", err=True)
-        if not _confirm("Continue anyway?", default=False):
-            sys.exit(1)
 
-    return sftp
+    while True:
+        host     = _prompt("Roon host (hostname or IP)", default=default_host)
+        ssh_port = click.prompt("SSH port", default=default_port, type=int)
+        username = _prompt("SSH username", default=default_username)
+
+        click.echo("\n  [1]  SSH key file  (recommended — no password stored)\n  [2]  Password\n")
+        auth = click.prompt("Auth method", type=click.Choice(["1", "2"]), default=default_auth)
+
+        sftp: dict = {"host": host, "port": ssh_port, "username": username}
+
+        if auth == "1":
+            if not os.path.exists(default_key):
+                click.echo(f"\n  No key found at {default_key}.")
+                if _confirm("  Generate one and install it on the Roon host now?"):
+                    _generate_and_install_key(host, ssh_port, username, default_key)
+            sftp["key_path"] = _prompt("Path to private key", default=default_key)
+        else:
+            sftp["password"] = click.prompt("SSH password", hide_input=True)
+
+        # Scan /proc/mounts on the Roon host for CIFS entries — those are the
+        # SMB shares Roon mounted via mount.cifs when you added them in Settings → Storage
+        click.echo(
+            "\n  Scanning Roon host for SMB shares (Roon mounts these via kernel CIFS) … ",
+            nl=False,
+        )
+        diag = ScanDiagnostics()
+        candidates = find_remote_playlist_paths(
+            host=host, port=ssh_port, username=username,
+            password=sftp.get("password"), key_path=sftp.get("key_path"),
+            diag=diag,
+        )
+
+        if not diag.ssh_ok:
+            click.echo("failed.\n")
+            click.echo(f"  Error: {diag.ssh_error}\n")
+            click.echo("  Options:")
+            click.echo("    [1]  Retry with different credentials")
+            click.echo("    [2]  Enter the remote path manually and continue")
+            click.echo("    [3]  Go back and choose a different output method")
+            choice = click.prompt("  Choose", type=click.Choice(["1", "2", "3"]), default="1")
+            if choice == "1":
+                # Keep host/port/username as defaults, loop again
+                default_host     = host
+                default_port     = ssh_port
+                default_username = username
+                default_auth     = auth
+                continue
+            elif choice == "2":
+                remote_dir = _prompt("Remote path to place M3U8 files")
+                sftp["remote_directory"] = remote_dir
+                return sftp
+            else:
+                raise _WizardBack()
+
+        if candidates:
+            # Filter out the home fallback from the top of the list if better options exist
+            real_candidates = [c for c in candidates if not c.startswith(("/root", "/home"))]
+            display = real_candidates[:6] if real_candidates else candidates[:6]
+            click.echo("found.\n")
+            click.echo("  These are the paths Roon has access to — pick where to put playlists:\n")
+            for i, p in enumerate(display):
+                click.echo(f"    [{i + 1}]  {p}")
+            click.echo(f"    [{len(display) + 1}]  Enter manually")
+            idx = click.prompt("  Choose", type=click.IntRange(1, len(display) + 1), default=1)
+            remote_dir = display[idx - 1] if idx <= len(display) else _prompt("Remote path")
+        else:
+            click.echo("none found.\n")
+            click.echo(
+                "  SSH connected but no mounts or audio files were found.\n"
+                "  Possible reasons:\n"
+                "   • SMB storage not yet added in Roon Settings → Storage\n"
+                "   • Proxmox bind-mount not yet configured on the host\n"
+                "   • Music is on a path not searched (/opt, /volume1, etc.)\n"
+            )
+            click.echo("  Scan diagnostics:\n")
+            for line in diag.report().splitlines():
+                click.echo(f"    {line}")
+            click.echo()
+            remote_dir = _prompt("Remote path to place M3U8 files")
+
+        sftp["remote_directory"] = remote_dir
+
+        click.echo("\nTesting SFTP connection … ", nl=False)
+        ok, msg = test_sftp_connection(SftpConfig(
+            host=host, port=ssh_port, username=username,
+            remote_directory=remote_dir,
+            password=sftp.get("password"), key_path=sftp.get("key_path"),
+        ))
+        if ok:
+            click.echo("OK")
+            return sftp
+
+        click.echo(f"Failed: {msg}\n")
+        click.echo("  Options:")
+        click.echo("    [1]  Retry with different credentials")
+        click.echo("    [2]  Continue anyway (path may not exist yet)")
+        click.echo("    [3]  Go back and choose a different output method")
+        choice = click.prompt("  Choose", type=click.Choice(["1", "2", "3"]), default="1")
+        if choice == "2":
+            return sftp
+        elif choice == "3":
+            raise _WizardBack()
+        # choice == "1": loop again, keep defaults
+        default_host     = host
+        default_port     = ssh_port
+        default_username = username
+        default_auth     = auth
 
 
 def _generate_and_install_key(host: str, port: int, username: str, key_path: str) -> None:
