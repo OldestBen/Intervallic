@@ -12,6 +12,7 @@ setup(
         "paramiko>=3.4.0",
         "qrcode>=7.4.2",
         "roonapi>=0.1.6",
+        "smbprotocol>=1.12.0",
     ],
     entry_points={
         "console_scripts": [

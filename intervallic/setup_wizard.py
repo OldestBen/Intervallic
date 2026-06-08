@@ -358,41 +358,87 @@ def wizard_output() -> dict:
     _header("Step 2 of 3 — Roon playlist destination")
 
     click.echo(
-        "\nRoon imports playlists from M3U8 files placed in a folder it watches.\n"
-        "Intervallic only writes files there — it never modifies Roon's database\n"
-        "or deletes anything.\n"
+        "\nRoon imports M3U8 files from inside its watched music folders.\n"
+        "Intervallic only writes files — it never touches Roon's database.\n"
         "\n"
-        "  [1]  Local path  — same machine, or a share already mounted here\n"
-        "  [2]  SFTP        — push files directly to the Roon host over SSH\n"
+        "How is your music library connected to Roon?\n"
+        "\n"
+        "  [1]  SMB / NAS share  — Roon connects to your NAS directly (most common)\n"
+        "  [2]  SFTP             — SSH into the Roon host and write files there\n"
+        "  [3]  Local path       — Roon is on this machine, or share is mounted here\n"
     )
-    choice = click.prompt("Choose", type=click.Choice(["1", "2"]), default="1")
+    choice = click.prompt("Choose", type=click.Choice(["1", "2", "3"]), default="1")
 
     out: dict = {"format": "m3u8", "overwrite": True}
 
     if choice == "1":
+        out["smb"] = _wizard_smb()
+    elif choice == "2":
+        out["sftp"] = _wizard_sftp()
+    else:
         out["directory"] = _prompt(
             "Path to Roon's watched playlist folder",
             default=os.path.expanduser("~/Music/Playlists"),
         )
-    else:
-        out["sftp"] = _wizard_sftp()
 
     return out
 
 
+def _wizard_smb() -> dict:
+    """Configure direct SMB write to the NAS share that Roon watches."""
+    click.echo(
+        "\n  Enter the details of the SMB share Roon is watching.\n"
+        "  This is the same share you configured in Roon → Settings → Storage.\n"
+    )
+    server = _prompt("NAS / SMB server (hostname or IP)")
+    share  = _prompt("Share name (e.g. music, Media, homes)")
+
+    click.echo("\n  Subfolder within the share where M3U8 files should go.")
+    click.echo("  Leave blank to place files at the share root.")
+    directory = _prompt("Subfolder (e.g. Playlists)", default="Playlists")
+
+    username = _prompt("SMB username", default=os.getenv("USER", ""))
+    password = click.prompt("SMB password", hide_input=True, default="", show_default=False)
+    domain   = _prompt("Domain (leave blank for workgroup/local)", default="")
+
+    smb: dict = {
+        "server":    server,
+        "share":     share,
+        "directory": directory,
+        "username":  username,
+    }
+    if password:
+        smb["password"] = password
+    if domain:
+        smb["domain"] = domain
+
+    click.echo("\nTesting SMB connection … ", nl=False)
+    from .output import test_smb_connection
+    from .config import SmbConfig
+    ok, msg = test_smb_connection(SmbConfig(
+        server=server, share=share, directory=directory,
+        username=username,
+        password=password or None,
+        domain=domain,
+    ))
+    if ok:
+        click.echo("OK")
+    else:
+        click.echo(f"Failed: {msg}", err=True)
+        if not _confirm("Continue anyway?", default=False):
+            sys.exit(1)
+
+    return smb
+
+
 def _wizard_sftp() -> dict:
     click.echo()
-
-    # Try auto-discovery first, but don't block on it
     click.echo("  Searching for Roon Core on the network … ", nl=False)
     from .roon_discovery import discover_roon_core
     core = discover_roon_core(timeout=6)
-    if core:
-        click.echo(f"found at {core[0]}")
-    else:
-        click.echo("not found (cross-VLAN or timed out)")
+    click.echo(f"found at {core}" if core else "not found (cross-VLAN or timed out)")
 
-    host     = _prompt("Roon host (hostname or IP)", default=core[0] if core else "")
+    host     = _prompt("Roon host (hostname or IP)", default=core or "")
     ssh_port = click.prompt("SSH port", default=22, type=int)
     username = _prompt("SSH username", default=os.getenv("USER", ""))
 
@@ -402,14 +448,11 @@ def _wizard_sftp() -> dict:
     sftp: dict = {"host": host, "port": ssh_port, "username": username}
 
     if auth == "1":
-        sftp["key_path"] = _prompt(
-            "Path to private key", default=os.path.expanduser("~/.ssh/id_rsa")
-        )
+        sftp["key_path"] = _prompt("Path to private key", default=os.path.expanduser("~/.ssh/id_rsa"))
     else:
         sftp["password"] = click.prompt("SSH password", hide_input=True)
 
-    # SSH scan for candidate paths — works regardless of how the host was found
-    click.echo("\n  Scanning Roon host for SMB mounts and music library paths … ", nl=False)
+    click.echo("\n  Scanning for music library paths … ", nl=False)
     from .roon_discovery import find_remote_playlist_paths
     candidates = find_remote_playlist_paths(
         host=host, port=ssh_port, username=username,
@@ -417,11 +460,7 @@ def _wizard_sftp() -> dict:
     )
 
     if candidates:
-        click.echo(f"done.\n")
-        click.echo(
-            "  Roon imports M3U8 files from inside its watched music folders.\n"
-            "  Paths from SMB/CIFS mounts are listed first — those are most likely correct.\n"
-        )
+        click.echo("done.\n")
         shown = candidates[:6]
         for i, p in enumerate(shown):
             click.echo(f"    [{i + 1}]  {p}")
@@ -429,12 +468,7 @@ def _wizard_sftp() -> dict:
         idx = click.prompt("  Choose", type=click.IntRange(1, len(shown) + 1), default=1)
         remote_dir = shown[idx - 1] if idx <= len(shown) else _prompt("Remote path")
     else:
-        click.echo("could not scan (will enter manually).")
-        click.echo(
-            "\n  Note: Roon imports M3U8 files from inside its watched music folders.\n"
-            "  For SMB/NAS setups, that is the mount point on the Roon host\n"
-            "  (e.g. /mnt/music/Playlists), NOT a local folder on this machine.\n"
-        )
+        click.echo("could not scan.")
         remote_dir = _prompt("Remote path to place M3U8 files")
 
     sftp["remote_directory"] = remote_dir
