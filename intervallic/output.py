@@ -1,17 +1,13 @@
-"""Handles writing playlist files locally or uploading via SFTP."""
+"""Handles writing playlist files locally, via SFTP, or directly to an SMB share."""
 from __future__ import annotations
 
-import io
-import os
 import posixpath
 import re
-import stat
-import tempfile
 from pathlib import Path
 from typing import List, Tuple
 
-from .config import Config, SftpConfig
-from .plex_client import PlexPlaylist, PlexTrack
+from .config import Config, SftpConfig, SmbConfig
+from .plex_client import PlexPlaylist
 
 
 def _safe_filename(name: str) -> str:
@@ -39,21 +35,28 @@ def write_local(playlist: PlexPlaylist, config: Config) -> Path:
     out_dir = Path(config.output.directory)
     out_dir.mkdir(parents=True, exist_ok=True)
     dest = out_dir / (_safe_filename(playlist.name) + ext)
-
     if dest.exists() and not config.output.overwrite:
         return dest
-
-    dest.write_text(
-        _build_m3u_content(playlist, config),
-        encoding=_encoding(config.output.format),
-    )
+    dest.write_text(_build_m3u_content(playlist, config), encoding=_encoding(config.output.format))
     return dest
 
 
 # ── SFTP output ───────────────────────────────────────────────────────────────
 
+def _open_sftp(sftp_cfg: SftpConfig):
+    import paramiko
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    kw: dict = dict(hostname=sftp_cfg.host, port=sftp_cfg.port, username=sftp_cfg.username or None)
+    if sftp_cfg.key_path:
+        kw["key_filename"] = sftp_cfg.key_path
+    if sftp_cfg.password:
+        kw["password"] = sftp_cfg.password
+    client.connect(**kw)
+    return client, client.open_sftp()
+
+
 def _sftp_mkdir_p(sftp, remote_dir: str) -> None:
-    """Create remote directory tree, skipping existing nodes."""
     parts = remote_dir.replace("\\", "/").split("/")
     current = ""
     for part in parts:
@@ -67,59 +70,31 @@ def _sftp_mkdir_p(sftp, remote_dir: str) -> None:
             sftp.mkdir(current)
 
 
-def _open_sftp(sftp_cfg: SftpConfig):
-    import paramiko
-
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-
-    connect_kwargs: dict = dict(
-        hostname=sftp_cfg.host,
-        port=sftp_cfg.port,
-        username=sftp_cfg.username or None,
-    )
-    if sftp_cfg.key_path:
-        connect_kwargs["key_filename"] = sftp_cfg.key_path
-    if sftp_cfg.password:
-        connect_kwargs["password"] = sftp_cfg.password
-
-    client.connect(**connect_kwargs)
-    return client, client.open_sftp()
-
-
 def write_sftp(playlist: PlexPlaylist, config: Config) -> str:
     assert config.output.sftp
-    sftp_cfg = config.output.sftp
-    ext = f".{config.output.format}"
-    filename = _safe_filename(playlist.name) + ext
-    remote_path = posixpath.join(sftp_cfg.remote_directory, filename)
-
+    cfg = config.output.sftp
+    filename = _safe_filename(playlist.name) + f".{config.output.format}"
+    remote_path = posixpath.join(cfg.remote_directory, filename)
     content = _build_m3u_content(playlist, config).encode(_encoding(config.output.format))
 
-    ssh, sftp = _open_sftp(sftp_cfg)
+    ssh, sftp = _open_sftp(cfg)
     try:
-        _sftp_mkdir_p(sftp, sftp_cfg.remote_directory)
-
+        _sftp_mkdir_p(sftp, cfg.remote_directory)
         try:
             sftp.stat(remote_path)
-            exists = True
+            if not config.output.overwrite:
+                return remote_path
         except FileNotFoundError:
-            exists = False
-
-        if exists and not config.output.overwrite:
-            return remote_path
-
+            pass
         with sftp.open(remote_path, "wb") as f:
             f.write(content)
     finally:
         sftp.close()
         ssh.close()
-
     return remote_path
 
 
 def test_sftp_connection(sftp_cfg: SftpConfig) -> Tuple[bool, str]:
-    """Returns (ok, message). Used by the setup wizard."""
     try:
         ssh, sftp = _open_sftp(sftp_cfg)
         sftp.close()
@@ -129,9 +104,75 @@ def test_sftp_connection(sftp_cfg: SftpConfig) -> Tuple[bool, str]:
         return False, str(exc)
 
 
+# ── SMB output ────────────────────────────────────────────────────────────────
+
+def _smb_unc(smb_cfg: SmbConfig, filename: str) -> str:
+    """Return the full smbclient UNC path for a file."""
+    base = f"//{smb_cfg.server}/{smb_cfg.share}"
+    if smb_cfg.directory:
+        return f"{base}/{smb_cfg.directory.strip('/')}/{filename}"
+    return f"{base}/{filename}"
+
+
+def _register_smb_session(smb_cfg: SmbConfig) -> None:
+    import smbclient
+    kw: dict = {}
+    if smb_cfg.username:
+        kw["username"] = smb_cfg.username
+    if smb_cfg.password:
+        kw["password"] = smb_cfg.password
+    if smb_cfg.domain:
+        kw["auth_protocol"] = "ntlm"
+    smbclient.register_session(smb_cfg.server, **kw)
+
+
+def write_smb(playlist: PlexPlaylist, config: Config) -> str:
+    import smbclient
+    assert config.output.smb
+    cfg = config.output.smb
+    filename = _safe_filename(playlist.name) + f".{config.output.format}"
+    unc_path = _smb_unc(cfg, filename)
+    content = _build_m3u_content(playlist, config).encode(_encoding(config.output.format))
+
+    _register_smb_session(cfg)
+
+    # Create the subdirectory if needed
+    if cfg.directory:
+        dir_unc = f"//{cfg.server}/{cfg.share}/{cfg.directory.strip('/')}"
+        try:
+            smbclient.makedirs(dir_unc, exist_ok=True)
+        except Exception:
+            pass
+
+    try:
+        smbclient.stat(unc_path)
+        if not config.output.overwrite:
+            return unc_path
+    except Exception:
+        pass
+
+    with smbclient.open_file(unc_path, mode="wb") as f:
+        f.write(content)
+
+    return unc_path
+
+
+def test_smb_connection(smb_cfg: SmbConfig) -> Tuple[bool, str]:
+    try:
+        import smbclient
+        _register_smb_session(smb_cfg)
+        unc = f"//{smb_cfg.server}/{smb_cfg.share}"
+        smbclient.listdir(unc)
+        return True, "Connection successful."
+    except Exception as exc:
+        return False, str(exc)
+
+
 # ── Dispatcher ────────────────────────────────────────────────────────────────
 
 def write_playlist(playlist: PlexPlaylist, config: Config):
+    if config.output.smb:
+        return write_smb(playlist, config)
     if config.output.sftp:
         return write_sftp(playlist, config)
     return write_local(playlist, config)

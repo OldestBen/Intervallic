@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import List, Optional
 
 import yaml
@@ -22,21 +21,39 @@ class SftpConfig:
     port: int = 22
     username: str = ""
     password: Optional[str] = None
-    key_path: Optional[str] = None  # path to private key file
+    key_path: Optional[str] = None
+
+
+@dataclass
+class SmbConfig:
+    # UNC-style: server=192.168.1.10, share=music, directory=Playlists
+    server: str
+    share: str
+    directory: str = ""        # subdirectory within the share (may be empty)
+    username: str = ""
+    password: Optional[str] = None
+    domain: str = ""
+
+    @property
+    def unc_directory(self) -> str:
+        """Full UNC path: //server/share/directory"""
+        base = f"//{self.server}/{self.share}"
+        if self.directory:
+            return base + "/" + self.directory.lstrip("/")
+        return base
 
 
 @dataclass
 class OutputConfig:
-    # For local output: path on this machine (or a mounted share)
-    directory: Optional[str] = None
-    # For remote SFTP output
+    directory: Optional[str] = None   # local path
     sftp: Optional[SftpConfig] = None
+    smb: Optional[SmbConfig] = None
     format: str = "m3u8"
     overwrite: bool = True
 
     def validate(self) -> None:
-        if not self.directory and not self.sftp:
-            raise ValueError("output must specify either 'directory' or 'sftp'")
+        if not any([self.directory, self.sftp, self.smb]):
+            raise ValueError("output must specify directory, sftp, or smb")
 
 
 @dataclass
@@ -71,21 +88,35 @@ def load_config(path: str) -> Config:
     )
 
     out_raw = raw.get("output", {})
-    sftp_raw = out_raw.get("sftp")
+
     sftp = None
-    if sftp_raw:
+    if out_raw.get("sftp"):
+        s = out_raw["sftp"]
         sftp = SftpConfig(
-            host=sftp_raw["host"],
-            remote_directory=sftp_raw["remote_directory"],
-            port=sftp_raw.get("port", 22),
-            username=sftp_raw.get("username", ""),
-            password=sftp_raw.get("password"),
-            key_path=sftp_raw.get("key_path"),
+            host=s["host"],
+            remote_directory=s["remote_directory"],
+            port=s.get("port", 22),
+            username=s.get("username", ""),
+            password=s.get("password"),
+            key_path=s.get("key_path"),
+        )
+
+    smb = None
+    if out_raw.get("smb"):
+        s = out_raw["smb"]
+        smb = SmbConfig(
+            server=s["server"],
+            share=s["share"],
+            directory=s.get("directory", ""),
+            username=s.get("username", ""),
+            password=s.get("password"),
+            domain=s.get("domain", ""),
         )
 
     output = OutputConfig(
         directory=out_raw.get("directory"),
         sftp=sftp,
+        smb=smb,
         format=out_raw.get("format", "m3u8"),
         overwrite=out_raw.get("overwrite", True),
     )
