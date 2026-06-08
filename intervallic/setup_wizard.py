@@ -545,7 +545,10 @@ def _generate_and_install_key(host: str, port: int, username: str, key_path: str
         import paramiko
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        client.connect(hostname=host, port=port, username=username, password=password)
+        client.connect(
+            hostname=host, port=port, username=username, password=password,
+            look_for_keys=False, allow_agent=False,
+        )
         client.exec_command(
             f"mkdir -p ~/.ssh && chmod 700 ~/.ssh && "
             f"echo '{pubkey}' >> ~/.ssh/authorized_keys && "

@@ -50,8 +50,12 @@ def _open_sftp(sftp_cfg: SftpConfig):
     kw: dict = dict(hostname=sftp_cfg.host, port=sftp_cfg.port, username=sftp_cfg.username or None)
     if sftp_cfg.key_path:
         kw["key_filename"] = sftp_cfg.key_path
-    if sftp_cfg.password:
+        kw["look_for_keys"] = False
+        kw["allow_agent"] = False
+    elif sftp_cfg.password:
         kw["password"] = sftp_cfg.password
+        kw["look_for_keys"] = False
+        kw["allow_agent"] = False
     client.connect(**kw)
     return client, client.open_sftp()
 
