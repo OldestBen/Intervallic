@@ -139,25 +139,6 @@ def find_remote_playlist_paths(
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
-    connect_kw: dict = dict(
-        hostname=host,
-        port=port,
-        username=username or None,
-        timeout=10,
-    )
-    if key_path:
-        # Key auth: don't let paramiko fall back to agent or other keys
-        connect_kw["key_filename"] = key_path
-        connect_kw["look_for_keys"] = False
-        connect_kw["allow_agent"] = False
-    elif password:
-        # Password auth: disable agent and key search so paramiko uses the
-        # password directly without exhausting auth attempts first.
-        # Also enable keyboard-interactive fallback (common on Debian/Ubuntu).
-        connect_kw["password"] = password
-        connect_kw["look_for_keys"] = False
-        connect_kw["allow_agent"] = False
-
     def run(cmd: str, timeout: int = 15) -> list[str]:
         try:
             _, stdout, stderr = client.exec_command(cmd, timeout=timeout)
@@ -171,7 +152,8 @@ def find_remote_playlist_paths(
     candidates: list[str] = []
 
     try:
-        client.connect(**connect_kw)
+        from .ssh_util import _open_ssh
+        client = _open_ssh(host, port, username, password=password, key_path=key_path)
         diag.ssh_ok = True
 
         sftp = client.open_sftp()

@@ -44,19 +44,11 @@ def write_local(playlist: PlexPlaylist, config: Config) -> Path:
 # ── SFTP output ───────────────────────────────────────────────────────────────
 
 def _open_sftp(sftp_cfg: SftpConfig):
-    import paramiko
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    kw: dict = dict(hostname=sftp_cfg.host, port=sftp_cfg.port, username=sftp_cfg.username or None)
-    if sftp_cfg.key_path:
-        kw["key_filename"] = sftp_cfg.key_path
-        kw["look_for_keys"] = False
-        kw["allow_agent"] = False
-    elif sftp_cfg.password:
-        kw["password"] = sftp_cfg.password
-        kw["look_for_keys"] = False
-        kw["allow_agent"] = False
-    client.connect(**kw)
+    from .ssh_util import _open_ssh
+    client = _open_ssh(
+        sftp_cfg.host, sftp_cfg.port, sftp_cfg.username,
+        password=sftp_cfg.password, key_path=sftp_cfg.key_path,
+    )
     return client, client.open_sftp()
 
 
