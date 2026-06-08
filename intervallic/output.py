@@ -24,7 +24,7 @@ def _build_m3u_content(playlist: PlexPlaylist, config: Config) -> str:
 
 
 def _encoding(fmt: str) -> str:
-    return "utf-8" if fmt == "m3u8" else "latin-1"
+    return "utf-8"
 
 
 # ── Local output ──────────────────────────────────────────────────────────────

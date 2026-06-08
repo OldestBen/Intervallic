@@ -26,11 +26,13 @@ def run_sync(config: Config, dry_run: bool = False) -> None:
         print("\nDry run — no files written.")
         return
 
-    destination = (
-        f"sftp://{config.output.sftp.host}{config.output.sftp.remote_directory}"
-        if config.output.sftp
-        else config.output.directory
-    )
+    if config.output.sftp:
+        destination = f"sftp://{config.output.sftp.host}{config.output.sftp.remote_directory}"
+    elif config.output.smb:
+        cfg = config.output.smb
+        destination = f"//{cfg.server}/{cfg.share}/{cfg.directory or ''}".rstrip("/")
+    else:
+        destination = config.output.directory
     print(f"\nWriting to {destination}…")
 
     written = write_all_playlists(playlists, config)
