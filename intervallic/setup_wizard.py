@@ -357,25 +357,15 @@ def wizard_plex() -> dict:
 def wizard_output() -> dict:
     _header("Step 2 of 3 — Roon playlist destination")
 
-    click.echo("\nSearching for Roon Core on the network … ", nl=False)
-    from .roon_discovery import discover_roon_core
-    core = discover_roon_core(timeout=8)
-
-    if core:
-        click.echo(f"found at {core[0]}")
-    else:
-        click.echo("not found (will configure manually)")
-
     click.echo(
         "\nRoon imports playlists from M3U8 files placed in a folder it watches.\n"
+        "Intervallic only writes files there — it never modifies Roon's database\n"
+        "or deletes anything.\n"
         "\n"
         "  [1]  Local path  — same machine, or a share already mounted here\n"
         "  [2]  SFTP        — push files directly to the Roon host over SSH\n"
     )
-
-    # Default to SFTP if we found a remote Core; local otherwise
-    default_choice = "2" if (core and core[0] != _local_ip()) else "1"
-    choice = click.prompt("Choose", type=click.Choice(["1", "2"]), default=default_choice)
+    choice = click.prompt("Choose", type=click.Choice(["1", "2"]), default="1")
 
     out: dict = {"format": "m3u8", "overwrite": True}
 
@@ -385,15 +375,24 @@ def wizard_output() -> dict:
             default=os.path.expanduser("~/Music/Playlists"),
         )
     else:
-        out["sftp"] = _wizard_sftp(discovered_host=core[0] if core else None)
+        out["sftp"] = _wizard_sftp()
 
     return out
 
 
-def _wizard_sftp(discovered_host: Optional[str] = None) -> dict:
+def _wizard_sftp() -> dict:
     click.echo()
 
-    host     = _prompt("Roon host (hostname or IP)", default=discovered_host or "")
+    # Try auto-discovery first, but don't block on it
+    click.echo("  Searching for Roon Core on the network … ", nl=False)
+    from .roon_discovery import discover_roon_core
+    core = discover_roon_core(timeout=6)
+    if core:
+        click.echo(f"found at {core[0]}")
+    else:
+        click.echo("not found (cross-VLAN or timed out)")
+
+    host     = _prompt("Roon host (hostname or IP)", default=core[0] if core else "")
     ssh_port = click.prompt("SSH port", default=22, type=int)
     username = _prompt("SSH username", default=os.getenv("USER", ""))
 
@@ -409,8 +408,8 @@ def _wizard_sftp(discovered_host: Optional[str] = None) -> dict:
     else:
         sftp["password"] = click.prompt("SSH password", hide_input=True)
 
-    # Try to find the right remote directory automatically
-    click.echo("\nScanning Roon host for music library paths … ", nl=False)
+    # SSH scan for candidate paths — works regardless of how the host was found
+    click.echo("\n  Scanning Roon host for music library paths … ", nl=False)
     from .roon_discovery import find_remote_playlist_paths
     candidates = find_remote_playlist_paths(
         host=host, port=ssh_port, username=username,
@@ -418,23 +417,15 @@ def _wizard_sftp(discovered_host: Optional[str] = None) -> dict:
     )
 
     if candidates:
-        click.echo(f"found {len(candidates)} candidate(s).")
-        click.echo("\n  Suggested paths:")
-        for i, p in enumerate(candidates[:6]):
+        click.echo(f"found {len(candidates)} candidate(s).\n")
+        shown = candidates[:6]
+        for i, p in enumerate(shown):
             click.echo(f"    [{i + 1}]  {p}")
-        click.echo(f"    [{len(candidates[:6]) + 1}]  Enter manually")
-
-        idx = click.prompt(
-            "  Choose",
-            type=click.IntRange(1, len(candidates[:6]) + 1),
-            default=1,
-        )
-        if idx <= len(candidates[:6]):
-            remote_dir = candidates[idx - 1]
-        else:
-            remote_dir = _prompt("Remote path")
+        click.echo(f"    [{len(shown) + 1}]  Enter manually")
+        idx = click.prompt("  Choose", type=click.IntRange(1, len(shown) + 1), default=1)
+        remote_dir = shown[idx - 1] if idx <= len(shown) else _prompt("Remote path")
     else:
-        click.echo("could not scan (SSH may not be set up yet).")
+        click.echo("could not scan.")
         remote_dir = _prompt(
             "Remote path to Roon's watched playlist folder",
             default=f"/home/{username}/Music/Playlists",
