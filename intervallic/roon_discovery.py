@@ -171,7 +171,7 @@ def find_remote_playlist_paths(
     candidates: list[str] = []
 
     try:
-        client.connect(**connect_kw, timeout=10)
+        client.connect(**connect_kw)
         diag.ssh_ok = True
 
         sftp = client.open_sftp()
