@@ -358,23 +358,23 @@ def wizard_output() -> dict:
     _header("Step 2 of 3 — Roon playlist destination")
 
     click.echo(
-        "\nRoon imports M3U8 files from inside its watched music folders.\n"
-        "Intervallic only writes files — it never touches Roon's database.\n"
+        "\nRoon on Linux mounts SMB shares via the kernel CIFS driver — those\n"
+        "mount points are accessible over SSH. Intervallic only writes M3U8\n"
+        "files and never touches Roon's database.\n"
         "\n"
-        "How is your music library connected to Roon?\n"
-        "\n"
-        "  [1]  SMB / NAS share  — Roon connects to your NAS directly (most common)\n"
-        "  [2]  SFTP             — SSH into the Roon host and write files there\n"
-        "  [3]  Local path       — Roon is on this machine, or share is mounted here\n"
+        "  [1]  SSH to Roon host  — detects mounted SMB shares automatically\n"
+        "                           (recommended for Linux / Proxmox LXC)\n"
+        "  [2]  SMB credentials   — connect directly to the NAS (cross-platform)\n"
+        "  [3]  Local path        — Roon is on this machine or share is mounted here\n"
     )
     choice = click.prompt("Choose", type=click.Choice(["1", "2", "3"]), default="1")
 
     out: dict = {"format": "m3u8", "overwrite": True}
 
     if choice == "1":
-        out["smb"] = _wizard_smb()
-    elif choice == "2":
         out["sftp"] = _wizard_sftp()
+    elif choice == "2":
+        out["smb"] = _wizard_smb()
     else:
         out["directory"] = _prompt(
             "Path to Roon's watched playlist folder",
@@ -432,27 +432,43 @@ def _wizard_smb() -> dict:
 
 
 def _wizard_sftp() -> dict:
+    """
+    SSH into the Roon host and detect which CIFS mount points Roon has
+    created for its SMB storage connections. Write M3U8 files there via SFTP.
+    No SMB credentials required — just SSH access to the Roon host.
+    """
     click.echo()
     click.echo("  Searching for Roon Core on the network … ", nl=False)
     from .roon_discovery import discover_roon_core
     core = discover_roon_core(timeout=6)
-    click.echo(f"found at {core}" if core else "not found (cross-VLAN or timed out)")
+    click.echo(f"found at {core}" if core else "not found (cross-VLAN — enter IP manually)")
 
     host     = _prompt("Roon host (hostname or IP)", default=core or "")
     ssh_port = click.prompt("SSH port", default=22, type=int)
-    username = _prompt("SSH username", default=os.getenv("USER", ""))
+    username = _prompt("SSH username", default="root")
 
-    click.echo("\n  [1]  SSH key file  (recommended)\n  [2]  Password\n")
+    click.echo("\n  [1]  SSH key file  (recommended — no password stored)\n  [2]  Password\n")
     auth = click.prompt("Auth method", type=click.Choice(["1", "2"]), default="1")
 
     sftp: dict = {"host": host, "port": ssh_port, "username": username}
 
     if auth == "1":
-        sftp["key_path"] = _prompt("Path to private key", default=os.path.expanduser("~/.ssh/id_rsa"))
+        default_key = os.path.expanduser("~/.ssh/id_rsa")
+        # Offer to generate a key and install it if none exists
+        if not os.path.exists(default_key):
+            click.echo(f"\n  No key found at {default_key}.")
+            if _confirm("  Generate one and install it on the Roon host now?"):
+                _generate_and_install_key(host, ssh_port, username, default_key)
+        sftp["key_path"] = _prompt("Path to private key", default=default_key)
     else:
         sftp["password"] = click.prompt("SSH password", hide_input=True)
 
-    click.echo("\n  Scanning for music library paths … ", nl=False)
+    # Scan /proc/mounts on the Roon host for CIFS entries — those are the
+    # SMB shares Roon mounted via mount.cifs when you added them in Settings → Storage
+    click.echo(
+        "\n  Scanning Roon host for SMB shares (Roon mounts these via kernel CIFS) … ",
+        nl=False,
+    )
     from .roon_discovery import find_remote_playlist_paths
     candidates = find_remote_playlist_paths(
         host=host, port=ssh_port, username=username,
@@ -460,7 +476,8 @@ def _wizard_sftp() -> dict:
     )
 
     if candidates:
-        click.echo("done.\n")
+        click.echo("found.\n")
+        click.echo("  These are the SMB shares Roon has mounted — pick where to put playlists:\n")
         shown = candidates[:6]
         for i, p in enumerate(shown):
             click.echo(f"    [{i + 1}]  {p}")
@@ -468,7 +485,13 @@ def _wizard_sftp() -> dict:
         idx = click.prompt("  Choose", type=click.IntRange(1, len(shown) + 1), default=1)
         remote_dir = shown[idx - 1] if idx <= len(shown) else _prompt("Remote path")
     else:
-        click.echo("could not scan.")
+        click.echo("none found.\n")
+        click.echo(
+            "  Could not detect CIFS mounts. This can happen if:\n"
+            "   • Roon hasn't been configured with an SMB storage location yet\n"
+            "   • The SMB share was added but hasn't been rescanned\n"
+            "   • SSH connection failed (check credentials above)\n"
+        )
         remote_dir = _prompt("Remote path to place M3U8 files")
 
     sftp["remote_directory"] = remote_dir
@@ -488,6 +511,39 @@ def _wizard_sftp() -> dict:
             sys.exit(1)
 
     return sftp
+
+
+def _generate_and_install_key(host: str, port: int, username: str, key_path: str) -> None:
+    """Generate an SSH keypair and install the public key on the Roon host."""
+    import subprocess
+    pub_path = key_path + ".pub"
+    try:
+        click.echo(f"  Generating key at {key_path} … ", nl=False)
+        subprocess.run(
+            ["ssh-keygen", "-t", "ed25519", "-N", "", "-f", key_path],
+            check=True, capture_output=True,
+        )
+        click.echo("done.")
+        password = click.prompt(
+            f"  SSH password for {username}@{host} (to install the key)",
+            hide_input=True,
+        )
+        with open(pub_path) as f:
+            pubkey = f.read().strip()
+        import paramiko
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.connect(hostname=host, port=port, username=username, password=password)
+        client.exec_command(
+            f"mkdir -p ~/.ssh && chmod 700 ~/.ssh && "
+            f"echo '{pubkey}' >> ~/.ssh/authorized_keys && "
+            f"chmod 600 ~/.ssh/authorized_keys"
+        )
+        client.close()
+        click.echo("  Public key installed. You won't need a password again.")
+    except Exception as exc:
+        click.echo(f"  Could not install key automatically: {exc}")
+        click.echo(f"  You can install it manually: ssh-copy-id -i {pub_path} {username}@{host}")
 
 
 # ── Wizard step 3: path mapping ───────────────────────────────────────────────
