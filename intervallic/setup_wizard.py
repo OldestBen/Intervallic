@@ -355,7 +355,16 @@ def wizard_plex() -> dict:
 # ── Wizard step 2: output ─────────────────────────────────────────────────────
 
 def wizard_output() -> dict:
-    _header("Step 2 of 3 — Playlist destination")
+    _header("Step 2 of 3 — Roon playlist destination")
+
+    click.echo("\nSearching for Roon Core on the network … ", nl=False)
+    from .roon_discovery import discover_roon_core
+    core = discover_roon_core(timeout=8)
+
+    if core:
+        click.echo(f"found at {core[0]}")
+    else:
+        click.echo("not found (will configure manually)")
 
     click.echo(
         "\nRoon imports playlists from M3U8 files placed in a folder it watches.\n"
@@ -363,7 +372,10 @@ def wizard_output() -> dict:
         "  [1]  Local path  — same machine, or a share already mounted here\n"
         "  [2]  SFTP        — push files directly to the Roon host over SSH\n"
     )
-    choice = click.prompt("Choose", type=click.Choice(["1", "2"]), default="1")
+
+    # Default to SFTP if we found a remote Core; local otherwise
+    default_choice = "2" if (core and core[0] != _local_ip()) else "1"
+    choice = click.prompt("Choose", type=click.Choice(["1", "2"]), default=default_choice)
 
     out: dict = {"format": "m3u8", "overwrite": True}
 
@@ -373,28 +385,22 @@ def wizard_output() -> dict:
             default=os.path.expanduser("~/Music/Playlists"),
         )
     else:
-        out["sftp"] = _wizard_sftp()
+        out["sftp"] = _wizard_sftp(discovered_host=core[0] if core else None)
 
     return out
 
 
-def _wizard_sftp() -> dict:
+def _wizard_sftp(discovered_host: Optional[str] = None) -> dict:
     click.echo()
-    host       = _prompt("Roon host (hostname or IP)")
-    port       = click.prompt("SSH port", default=22, type=int)
-    username   = _prompt("SSH username", default=os.getenv("USER", ""))
-    remote_dir = _prompt(
-        "Remote path to Roon's watched playlist folder",
-        default=f"/home/{os.getenv('USER', 'roon')}/Music/Playlists",
-    )
+
+    host     = _prompt("Roon host (hostname or IP)", default=discovered_host or "")
+    ssh_port = click.prompt("SSH port", default=22, type=int)
+    username = _prompt("SSH username", default=os.getenv("USER", ""))
 
     click.echo("\n  [1]  SSH key file  (recommended)\n  [2]  Password\n")
     auth = click.prompt("Auth method", type=click.Choice(["1", "2"]), default="1")
 
-    sftp: dict = {
-        "host": host, "port": port,
-        "username": username, "remote_directory": remote_dir,
-    }
+    sftp: dict = {"host": host, "port": ssh_port, "username": username}
 
     if auth == "1":
         sftp["key_path"] = _prompt(
@@ -403,10 +409,44 @@ def _wizard_sftp() -> dict:
     else:
         sftp["password"] = click.prompt("SSH password", hide_input=True)
 
+    # Try to find the right remote directory automatically
+    click.echo("\nScanning Roon host for music library paths … ", nl=False)
+    from .roon_discovery import find_remote_playlist_paths
+    candidates = find_remote_playlist_paths(
+        host=host, port=ssh_port, username=username,
+        password=sftp.get("password"), key_path=sftp.get("key_path"),
+    )
+
+    if candidates:
+        click.echo(f"found {len(candidates)} candidate(s).")
+        click.echo("\n  Suggested paths:")
+        for i, p in enumerate(candidates[:6]):
+            click.echo(f"    [{i + 1}]  {p}")
+        click.echo(f"    [{len(candidates[:6]) + 1}]  Enter manually")
+
+        idx = click.prompt(
+            "  Choose",
+            type=click.IntRange(1, len(candidates[:6]) + 1),
+            default=1,
+        )
+        if idx <= len(candidates[:6]):
+            remote_dir = candidates[idx - 1]
+        else:
+            remote_dir = _prompt("Remote path")
+    else:
+        click.echo("could not scan (SSH may not be set up yet).")
+        remote_dir = _prompt(
+            "Remote path to Roon's watched playlist folder",
+            default=f"/home/{username}/Music/Playlists",
+        )
+
+    sftp["remote_directory"] = remote_dir
+
     click.echo("\nTesting SFTP connection … ", nl=False)
     from .output import test_sftp_connection
     ok, msg = test_sftp_connection(SftpConfig(
-        host=host, port=port, username=username, remote_directory=remote_dir,
+        host=host, port=ssh_port, username=username,
+        remote_directory=remote_dir,
         password=sftp.get("password"), key_path=sftp.get("key_path"),
     ))
     if ok:
