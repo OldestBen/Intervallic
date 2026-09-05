@@ -144,6 +144,110 @@ def audit(config_path: str, section: str, output: str, only_problems: bool) -> N
 
 
 @main.command()
+@click.argument("path", type=click.Path(exists=True, file_okay=False), default=".")
+@click.option("--execute", is_flag=True, default=False,
+              help="Actually move files. Without this, runs as a dry run.")
+@click.option("--no-zips", is_flag=True, default=False,
+              help="Only move folders, leave archives where they are.")
+@click.option("--report", "-r", default=None, help="Write the full plan to a CSV file.")
+def organize(path: str, execute: bool, no_zips: bool, report: str) -> None:
+    """Sort "Album - Artist" downloads into per-artist folders.
+
+    \b
+    Infers the artist from the structure of the batch itself — repeated
+    artists, self-titled albums and release markers all vote on where each
+    split belongs. Dry run by default.
+    """
+    from pathlib import Path
+    from .organize import build_plan, execute_plan, write_csv
+
+    click.echo(f"\n  {_BANNER}\n")
+
+    root = Path(path).resolve()
+    click.echo(f"  {click.style('→', fg='cyan')}  Scanning {click.style(str(root), bold=True)}…")
+
+    plan = build_plan(root, include_zips=not no_zips)
+
+    if not plan.decisions:
+        click.echo(f"\n  {click.style('⚠', fg='yellow', bold=True)}  Nothing to sort.\n")
+        for name, reason in plan.skipped:
+            click.echo(click.style(f"       {name}  —  {reason}", dim=True))
+        click.echo()
+        return
+
+    grouped = plan.by_artist()
+    click.echo(
+        f"  {click.style('✓', fg='green', bold=True)}  "
+        f"{click.style(str(len(plan.decisions)), bold=True)} item(s)  ·  "
+        f"{click.style(str(len(grouped)), bold=True)} artist(s)\n"
+    )
+
+    _CONF_STYLE = {
+        "certain": ("", "green"),
+        "high":    ("", "green"),
+        "medium":  ("?", "yellow"),
+        "low":     ("!", "red"),
+    }
+
+    for artist in sorted(grouped, key=str.lower):
+        decisions = grouped[artist]
+        click.echo(f"  {click.style(artist, fg='yellow', bold=True)}")
+        for d in decisions:
+            mark, colour = _CONF_STYLE[d.confidence]
+            flag = click.style(f" {mark}", fg=colour, bold=True) if mark else "  "
+            kind = click.style("zip" if not d.item.is_dir else "dir", dim=True)
+            click.echo(f"      {flag} {d.album}  {kind}")
+        click.echo()
+
+    review = plan.review_items
+    if review:
+        click.echo(f"  {click.style('Needs review', fg='yellow', bold=True)}")
+        click.echo("  " + click.style("─" * 58, dim=True))
+        for d in review:
+            if d.normalised_from:
+                click.echo(
+                    f"      {click.style(d.artist, bold=True)}  "
+                    + click.style(f"← \"{d.normalised_from}\"  (name cleaned)", dim=True)
+                )
+            else:
+                click.echo(
+                    f"      {click.style(d.item.path.name, bold=True)}\n"
+                    f"          → artist {click.style(d.artist, fg='yellow')}  "
+                    + click.style(f"({d.confidence}: {d.reason})", dim=True)
+                )
+        click.echo()
+
+    if plan.skipped:
+        click.echo(click.style("  Skipped", dim=True))
+        for name, reason in plan.skipped:
+            click.echo(click.style(f"      {name}  —  {reason}", dim=True))
+        click.echo()
+
+    if report:
+        write_csv(plan, report)
+        click.echo(
+            f"  {click.style('✓', fg='green', bold=True)}  "
+            f"Plan written to {click.style(report, bold=True)}\n"
+        )
+
+    if not execute:
+        click.echo(
+            f"  {click.style('Dry run', fg='cyan', bold=True)} — nothing was moved.\n"
+            f"  Re-run with {click.style('--execute', bold=True)} when the list above looks right.\n"
+        )
+        return
+
+    moved, failures = execute_plan(plan)
+    click.echo(
+        f"  {click.style('✓', fg='green', bold=True)}  "
+        f"Moved {click.style(str(moved), bold=True)} item(s)."
+    )
+    for name, reason in failures:
+        click.echo(f"  {click.style('✗', fg='red', bold=True)}  {name}  —  {reason}")
+    click.echo()
+
+
+@main.command()
 @click.argument("host")
 @click.option("--port", default=22, show_default=True, help="SSH port.")
 @click.option("--username", "-u", default="root", show_default=True, help="SSH username.")

@@ -219,6 +219,51 @@ intervallic audit --section "Music"       # specific section
 intervallic audit -o incomplete.csv       # export to CSV
 ```
 
+### `intervallic organize [PATH]`
+
+Sort a folder of `Album - Artist` downloads into per-artist folders. Dry run by default — nothing moves until you pass `--execute`.
+
+```
+Usage: intervallic organize [OPTIONS] [PATH]
+
+Options:
+  --execute        Actually move files (default is a dry run)
+  --no-zips        Only move folders, leave archives where they are
+  -r, --report FILE  Write the full plan to a CSV file
+  --help           Show this message and exit
+```
+
+**Why not just split on the last " - "?**
+
+Because album titles contain hyphens too — `Inside-Out`, `Re-Assemble`, `1996-2006`, `- Single -`. Splitting on the last separator happens to work much of the time, but it is a guess with no way to tell you when it guessed wrong.
+
+Instead, `organize` treats the whole batch as a corpus and lets it validate itself:
+
+1. **Anchor** — items with exactly one separator are unambiguous. Their artists are recorded.
+2. **Count** — an artist appearing several times across the batch is strong evidence. `Jamiroquai` ×5 and `Creed` ×4 confirm themselves.
+3. **Score** — ambiguous items are scored against the anchor set plus structural rules. Release markers (`Single`, `EP`, `Remastered`) and parenthetical qualifiers (`(Deluxe Edition)`, `(feat. …)`) always bind to the album side, so any split that leaves one on the artist side is penalised.
+4. **Normalise** — duplicate suffixes are stripped when the base name is a known artist (`Small Faces-2` → `Small Faces`, but `Blink-182` is left alone), and characters your downloader stripped are restored (`Songs_ Ohia` → `Songs Ohia`).
+
+Every decision carries a confidence level, so the handful that need a human eye are flagged rather than silently guessed:
+
+| Confidence | Meaning |
+|-----------|---------|
+| `certain` | Artist repeats in the batch, or the album is self-titled |
+| `high` | Single unambiguous separator, or a clear scoring win |
+| `? medium` | Resolved, but the runner-up split was close |
+| `! low` | Genuinely ambiguous — check this one |
+
+Folders and their matching `.zip` archives are recognised as the same release and filed together.
+
+```bash
+intervallic organize                          # preview the current directory
+intervallic organize ~/Downloads/Music        # preview a specific folder
+intervallic organize -r plan.csv              # preview + export the plan
+intervallic organize --execute                # do it
+```
+
+Re-running after a sort is a safe no-op — already-sorted artist folders have no separator and are skipped.
+
 ### `intervallic diagnose HOST`
 
 SSH into your Roon host and report everything found: mounts, audio directories, existing playlist locations. Useful for setting up `path_mapping` or `remote_directory`.
