@@ -189,6 +189,36 @@ Options:
   --help             Show this message and exit
 ```
 
+### `intervallic audit`
+
+Scan your Plex music library for incomplete albums — missing tracks, gaps in track numbering, and files with no track number at all.
+
+```
+Usage: intervallic audit [OPTIONS]
+
+Options:
+  -c, --config PATH   Path to config file  [default: config.yaml]
+  --section TEXT      Music library section name (default: all music sections)
+  -o, --output FILE   Write full report to a CSV file
+  --help              Show this message and exit
+```
+
+**What it checks:**
+
+| Issue | Meaning |
+|-------|---------|
+| `MISSING` | A gap in the track sequence — e.g. tracks 1, 2, 4, 5 means track 3 is absent |
+| `NO NUM` | The file has no track number set in Plex at all |
+| `DUPE` | Two files share the same track number |
+
+Terminal output shows every affected album with per-track detail. Pass `-o report.csv` to export the full list as a CSV for sorting and filtering in a spreadsheet.
+
+```bash
+intervallic audit                         # scan all music sections
+intervallic audit --section "Music"       # specific section
+intervallic audit -o incomplete.csv       # export to CSV
+```
+
 ### `intervallic diagnose HOST`
 
 SSH into your Roon host and report everything found: mounts, audio directories, existing playlist locations. Useful for setting up `path_mapping` or `remote_directory`.

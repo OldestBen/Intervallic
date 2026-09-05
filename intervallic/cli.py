@@ -56,6 +56,94 @@ def setup(output_path: str) -> None:
 
 
 @main.command()
+@click.option("--config", "-c", "config_path", default="config.yaml", show_default=True,
+              help="Path to config file.")
+@click.option("--section", default=None, help="Music library section name (default: all music sections).")
+@click.option("--output", "-o", default=None, help="Write full report to a CSV file.")
+@click.option("--only-problems", is_flag=True, default=True, hidden=True)
+def audit(config_path: str, section: str, output: str, only_problems: bool) -> None:
+    """Scan your Plex music library for incomplete albums and missing tracks."""
+    click.echo(f"\n  {_BANNER}\n")
+
+    try:
+        config = load_config(config_path)
+    except FileNotFoundError:
+        _err(f"Config file not found: {config_path}")
+        click.echo(
+            f"       Run  {click.style('intervallic setup', bold=True)}  to create one.",
+            err=True,
+        )
+        sys.exit(1)
+    except Exception as exc:
+        _err(f"Failed to load config: {exc}")
+        sys.exit(1)
+
+    from .audit import audit_library, write_csv
+
+    click.echo(f"  {click.style('→', fg='cyan')}  Scanning Plex library…", nl=False)
+    reports, warnings = audit_library(
+        url=config.plex.url,
+        token=config.plex.token,
+        section_name=section,
+    )
+    click.echo(f"\r  {click.style('✓', fg='green', bold=True)}  Scan complete.         \n")
+
+    for w in warnings:
+        click.echo(f"  {click.style('⚠', fg='yellow', bold=True)}  {w}")
+
+    if not reports:
+        click.echo(f"  {click.style('✓', fg='green', bold=True)}  No issues found — all albums look complete.\n")
+        return
+
+    # Summary line
+    total_albums  = len(reports)
+    total_missing = sum(r.missing_count for r in reports)
+    total_unnum   = sum(r.unnumbered_count for r in reports)
+
+    click.echo(
+        f"  Found {click.style(str(total_albums), bold=True, fg='yellow')} album(s) with issues"
+        + (f"  ·  {click.style(str(total_missing), bold=True)} gap(s)" if total_missing else "")
+        + (f"  ·  {click.style(str(total_unnum), bold=True)} unnumbered track(s)" if total_unnum else "")
+        + "\n"
+    )
+
+    # Per-album detail
+    for r in reports:
+        artist_album = click.style(f"{r.artist} — {r.album}", bold=True)
+        year_str     = click.style(f"({r.year})", dim=True) if r.year else ""
+        click.echo(f"  {artist_album}  {year_str}")
+
+        for issue in r.issues:
+            num_str = f"#{issue.track_number:<3}" if issue.track_number is not None else "   "
+            if issue.issue == "gap_before":
+                tag   = click.style("MISSING", fg="red")
+                title = click.style(issue.title, dim=True)
+            elif issue.issue == "no_number":
+                tag   = click.style("NO NUM ", fg="yellow")
+                title = issue.title
+            else:
+                tag   = click.style("DUPE   ", fg="magenta")
+                title = issue.title
+            click.echo(f"       {tag}  {num_str}  {title}")
+
+        click.echo()
+
+    if output:
+        write_csv(reports, output)
+        click.echo(
+            f"  {click.style('✓', fg='green', bold=True)}  "
+            f"Full report written to {click.style(output, bold=True)}\n"
+        )
+    else:
+        click.echo(
+            click.style(
+                f"  Tip: run with  -o report.csv  to export the full list.\n",
+                dim=True,
+            )
+        )
+
+
+@main.command()
 @click.argument("host")
 @click.option("--port", default=22, show_default=True, help="SSH port.")
 @click.option("--username", "-u", default="root", show_default=True, help="SSH username.")
