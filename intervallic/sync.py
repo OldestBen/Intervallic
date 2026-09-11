@@ -76,7 +76,29 @@ def run_sync(config: Config, dry_run: bool = False) -> None:
             f"{click.style(str(len(errors)), fg='red', bold=True)} "
             f"file(s) failed."
         )
+
+    if written:
+        _next_steps(config)
     click.echo()
+
+
+def _next_steps(config: Config) -> None:
+    """Writing the files is only half the job — Roon has to be told to look."""
+    click.echo(
+        f"\n  {click.style('Next:', bold=True)} Roon will not notice new files "
+        f"until it rescans.\n"
+        f"        Roon → Settings → Storage → ⋮ next to your library "
+        f"→ {click.style('Force Rescan', bold=True)}\n"
+    )
+    if not config.path_mapping:
+        click.echo(
+            click.style(
+                "  No path mapping is configured. If the playlists appear empty or\n"
+                "  do not show up at all, run  intervallic doctor  — the paths inside\n"
+                "  them are probably Plex's rather than Roon's.",
+                fg="yellow",
+            )
+        )
 
 
 def _write_one(pl, config):

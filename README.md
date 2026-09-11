@@ -35,39 +35,64 @@ Plex  ──► Intervallic ──► M3U files ──► Roon
 ```bash
 git clone https://github.com/OldestBen/Intervallic.git
 cd Intervallic
+make run
+```
+
+`make run` creates the virtualenv, installs everything, and then runs setup on the first go and a sync every time after. `make help` lists the rest.
+
+<details>
+<summary>Manual install, if you'd rather not use make</summary>
+
+```bash
 python -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -e .
+intervallic
 ```
+</details>
 
 ---
 
 ## Quick start
 
-Run the interactive setup wizard:
-
 ```bash
-intervallic setup
+intervallic
 ```
 
-The wizard walks you through three steps:
+That's it. The first time, it walks you through setup. Every time after that, it syncs.
 
-1. **Plex authentication** — sign in via browser OAuth (no password stored in plaintext)
-2. **Output destination** — choose SMB (recommended for Roon), SFTP, or a local path
-3. **Path mapping** — translate Plex-side file paths to the paths Roon sees
+The setup wizard covers three things:
 
-When finished it writes `config.yaml`. Test it immediately:
+1. **Plex authentication** — sign in via your browser (no password typed into a terminal)
+2. **Output destination** — SMB (recommended for Roon), SFTP, or a local path
+3. **Path mapping** — translate Plex's file paths to the ones Roon uses
+
+Your config is saved to `~/.config/intervallic/config.yaml` and found automatically from then on, whatever directory you run from.
+
+### If something isn't working
 
 ```bash
-intervallic sync --dry-run   # lists playlists, writes nothing
-intervallic sync             # the real thing
+intervallic doctor
 ```
+
+Checks the whole chain — Plex reachable, destination writable, and whether the paths written into your playlists are paths Roon will actually recognise. Anything broken comes with the fix, including config you can paste straight in.
+
+That last check matters more than it sounds. A playlist can be written perfectly and still be invisible to Roon, because the paths inside it are Plex's rather than Roon's. Roon gives no error for this — it just shows nothing. `doctor` finds a real track on your share and tells you exactly what the mapping should be.
 
 ---
 
 ## Configuration
 
-`config.yaml` is the single source of truth. Run `intervallic setup` to generate it, or write it by hand using `config.example.yaml` as a reference.
+Run `intervallic setup` to generate a config, or write one by hand using `config.example.yaml` as a reference.
+
+Intervallic looks for a config in these places, in order — the first one found wins:
+
+1. `$INTERVALLIC_CONFIG` (if set)
+2. `./config.yaml` or `./intervallic.yaml`
+3. `~/.config/intervallic/config.yaml`  ← where `setup` writes by default
+4. `~/.intervallic.yaml`
+
+Pass `-c /some/path.yaml` to any command to override.
 
 ### Minimal example (SMB)
 
@@ -189,6 +214,30 @@ Options:
   --help             Show this message and exit
 ```
 
+### `intervallic doctor`
+
+Check the whole chain and explain anything broken.
+
+```
+Usage: intervallic doctor [OPTIONS]
+
+Options:
+  -c, --config PATH  Path to config file  [default: search the usual locations]
+  --help             Show this message and exit
+```
+
+Runs these checks:
+
+| Check | What it proves |
+|-------|----------------|
+| Plex connection | The URL and token work |
+| Plex playlists | There are audio playlists to sync |
+| Destination | The share, SFTP host, or folder is reachable |
+| Write permission | A real file can be written and deleted there |
+| Path mapping | The paths in your playlists are ones Roon will recognise |
+
+Exits non-zero if anything is broken, so it also works in scripts.
+
 ### `intervallic audit`
 
 Scan your Plex music library for incomplete albums — missing tracks, gaps in track numbering, and files with no track number at all.
@@ -303,9 +352,13 @@ crontab -e
 
 **Roon doesn't see the playlists after sync**
 
-- Check that Roon has a watched storage location that covers the directory you're writing to.
-- Trigger a library rescan: Roon → Settings → Storage → Force Rescan.
-- Confirm the path inside the `.m3u` file matches the path Roon expects. Use `--dry-run` first and inspect the output files manually.
+Run `intervallic doctor` first — it diagnoses this specific failure and tells you the fix.
+
+The usual causes, in order of likelihood:
+
+1. **Roon hasn't rescanned.** Roon → Settings → Storage → ⋮ → Force Rescan.
+2. **The paths inside the playlist are Plex's, not Roon's.** This is the silent one — Roon reads the file, can't resolve a single track, and shows nothing at all. You need a `path_mapping` entry; `doctor` works out what it should be.
+3. **Roon isn't watching that folder.** The directory you're writing to has to sit inside a storage location Roon is watching.
 
 **Smart / dynamic playlists are skipped with a warning**
 

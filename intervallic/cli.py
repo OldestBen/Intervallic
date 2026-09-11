@@ -5,78 +5,170 @@ import sys
 import click
 
 from . import __version__
-from .config import load_config
+from .config import find_config, load_config
 from .sync import run_sync
 
 _BANNER = click.style("Intervallic", fg="cyan", bold=True)
 
+_TICK = click.style("✓", fg="green", bold=True)
+_CROSS = click.style("✗", fg="red", bold=True)
+_WARN = click.style("⚠", fg="yellow", bold=True)
+
 
 def _err(msg: str) -> None:
-    click.echo(f"  {click.style('✗', fg='red', bold=True)}  {msg}", err=True)
+    click.echo(f"  {_CROSS}  {msg}", err=True)
 
 
-@click.group()
+def _load(config_path: str | None):
+    """Find and load a config, failing with guidance rather than a traceback."""
+    found = find_config(config_path)
+
+    if found is None:
+        _err("No config file found.")
+        click.echo(
+            f"\n  Run  {click.style('intervallic setup', bold=True)}  to create one "
+            f"— it takes about a minute.\n",
+            err=True,
+        )
+        sys.exit(1)
+
+    if not found.is_file():
+        _err(f"Config file not found: {found}")
+        click.echo(
+            f"\n  Run  {click.style('intervallic setup', bold=True)}  to create one.\n",
+            err=True,
+        )
+        sys.exit(1)
+
+    try:
+        return load_config(str(found)), found
+    except KeyError as exc:
+        _err(f"Config is missing a required setting: {exc}")
+        click.echo(f"       {click.style(str(found), dim=True)}", err=True)
+        click.echo(
+            f"\n  Run  {click.style('intervallic setup', bold=True)}  to regenerate it.\n",
+            err=True,
+        )
+        sys.exit(1)
+    except Exception as exc:
+        _err(f"Could not read config: {exc}")
+        click.echo(f"       {click.style(str(found), dim=True)}\n", err=True)
+        sys.exit(1)
+
+
+@click.group(invoke_without_command=True)
 @click.version_option(__version__, prog_name="intervallic")
-def main() -> None:
-    """Intervallic — sync Plex playlists to Roon."""
+@click.pass_context
+def main(ctx: click.Context) -> None:
+    """Intervallic — sync Plex playlists to Roon.
+
+    \b
+    Running `intervallic` on its own does the sensible thing: it walks you
+    through setup the first time, and syncs every time after that.
+    """
+    if ctx.invoked_subcommand is not None:
+        return
+
+    # No subcommand given — pick the one the user almost certainly wants.
+    if find_config(None) is None:
+        click.echo(
+            f"\n  {_BANNER}\n\n"
+            "  No config found, so let's create one.\n"
+        )
+        ctx.invoke(setup)
+    else:
+        ctx.invoke(sync)
 
 
 @main.command()
-@click.option("--config", "-c", "config_path", default="config.yaml", show_default=True,
-              help="Path to config file.")
+@click.option("--config", "-c", "config_path", default=None,
+              help="Path to config file (default: search the usual locations).")
 @click.option("--dry-run", is_flag=True, default=False,
               help="List playlists without writing any files.")
 def sync(config_path: str, dry_run: bool) -> None:
     """Sync Plex playlists to Roon as M3U/M3U8 files."""
     click.echo(f"\n  {_BANNER}\n")
-
-    try:
-        config = load_config(config_path)
-    except FileNotFoundError:
-        _err(f"Config file not found: {config_path}")
-        click.echo(
-            f"       Run  {click.style('intervallic setup', bold=True)}  to create one.",
-            err=True,
-        )
-        sys.exit(1)
-    except Exception as exc:
-        _err(f"Failed to load config: {exc}")
-        sys.exit(1)
-
+    config, path = _load(config_path)
+    click.echo(click.style(f"  Using {path}", dim=True))
     run_sync(config, dry_run=dry_run)
 
 
 @main.command()
-@click.option("--output", "-o", "output_path", default="config.yaml", show_default=True,
-              help="Where to write the generated config file.")
+@click.option("--config", "-c", "config_path", default=None,
+              help="Path to config file (default: search the usual locations).")
+def doctor(config_path: str) -> None:
+    """Check everything end to end and explain anything that is broken.
+
+    \b
+    Verifies that Plex is reachable, the destination is writable, and — most
+    importantly — that the paths written into your playlists are paths Roon
+    will actually recognise.
+    """
+    from .doctor import run_diagnostics, OK, WARN, FAIL, SKIP
+
+    click.echo(f"\n  {_BANNER}  doctor\n")
+    config, path = _load(config_path)
+    click.echo(click.style(f"  Using {path}\n", dim=True))
+
+    report = run_diagnostics(config)
+
+    marks = {
+        OK:   _TICK,
+        WARN: _WARN,
+        FAIL: _CROSS,
+        SKIP: click.style("–", dim=True),
+    }
+
+    for check in report.checks:
+        click.echo(f"  {marks[check.status]}  {click.style(check.name, bold=True)}")
+        click.echo(f"       {check.detail}")
+        if check.fix:
+            click.echo(click.style(f"       → {check.fix}", fg="cyan"))
+        if check.snippet:
+            click.echo()
+            for line in check.snippet.splitlines():
+                click.echo(click.style(f"         {line}", fg="yellow"))
+        click.echo()
+
+    click.echo("  " + click.style("─" * 58, dim=True))
+    if report.healthy and not report.warned:
+        click.echo(f"  {_TICK}  Everything looks good. Run "
+                   f"{click.style('intervallic sync', bold=True)}.\n")
+    elif report.healthy:
+        click.echo(f"  {_TICK}  No blocking problems — see the warnings above.\n")
+    else:
+        click.echo(
+            f"  {_CROSS}  {len(report.failed)} problem(s) need fixing before "
+            f"sync will work.\n"
+        )
+        sys.exit(1)
+
+
+@main.command()
+@click.option("--output", "-o", "output_path", default=None,
+              help="Where to write the config file (default: ~/.config/intervallic/config.yaml).")
 def setup(output_path: str) -> None:
     """Interactive first-time setup wizard."""
+    from .config import default_config_path
     from .setup_wizard import run_wizard
+
+    if output_path is None:
+        target = default_config_path()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        output_path = str(target)
+
     run_wizard(output_path)
 
 
 @main.command()
-@click.option("--config", "-c", "config_path", default="config.yaml", show_default=True,
-              help="Path to config file.")
+@click.option("--config", "-c", "config_path", default=None,
+              help="Path to config file (default: search the usual locations).")
 @click.option("--section", default=None, help="Music library section name (default: all music sections).")
 @click.option("--output", "-o", default=None, help="Write full report to a CSV file.")
-@click.option("--only-problems", is_flag=True, default=True, hidden=True)
-def audit(config_path: str, section: str, output: str, only_problems: bool) -> None:
+def audit(config_path: str, section: str, output: str) -> None:
     """Scan your Plex music library for incomplete albums and missing tracks."""
     click.echo(f"\n  {_BANNER}\n")
-
-    try:
-        config = load_config(config_path)
-    except FileNotFoundError:
-        _err(f"Config file not found: {config_path}")
-        click.echo(
-            f"       Run  {click.style('intervallic setup', bold=True)}  to create one.",
-            err=True,
-        )
-        sys.exit(1)
-    except Exception as exc:
-        _err(f"Failed to load config: {exc}")
-        sys.exit(1)
+    config, _ = _load(config_path)
 
     from .audit import audit_library, write_csv
 

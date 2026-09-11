@@ -1,9 +1,45 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import List, Optional
 
 import yaml
+
+
+def config_locations() -> List[Path]:
+    """Everywhere we look for a config file, in priority order."""
+    locations = []
+    env = os.environ.get("INTERVALLIC_CONFIG")
+    if env:
+        locations.append(Path(env).expanduser())
+    locations += [
+        Path.cwd() / "config.yaml",
+        Path.cwd() / "intervallic.yaml",
+        Path.home() / ".config" / "intervallic" / "config.yaml",
+        Path.home() / ".intervallic.yaml",
+    ]
+    return locations
+
+
+def find_config(explicit: Optional[str] = None) -> Optional[Path]:
+    """
+    Locate a config file. An explicit path is returned as-is (so a typo
+    surfaces as 'not found' rather than silently using a different file).
+    Otherwise the first of `config_locations()` that exists wins.
+    """
+    if explicit:
+        return Path(explicit).expanduser()
+    for candidate in config_locations():
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def default_config_path() -> Path:
+    """Where a new config should be written when the user gives no preference."""
+    return Path.home() / ".config" / "intervallic" / "config.yaml"
 
 
 @dataclass
